@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT
-from .process import run
+from .container import container_exec, container_exec_ok
 from .state import load_state, save_state
 
 # SSH bootstrap utilities: reserve host SSH port, choose an interactive shell,
@@ -30,7 +30,7 @@ def alloc_ssh_port(workspace: Path) -> int:
 
 def detect_shell(container_id: str, preset_cmd: str | None = None) -> list[str]:
 	# Some minimal images only ship /bin/sh; probe before assuming bash.
-	bash_ok = subprocess.run(["podman", "exec", container_id, "test", "-x", "/bin/bash"]).returncode == 0
+	bash_ok = container_exec_ok(container_id, ["test", "-x", "/bin/bash"])
 	if preset_cmd:
 		if bash_ok:
 			# `exec` replaces the bootstrap shell so signal handling/job control
@@ -54,20 +54,16 @@ def ssh_bootstrap(container_id: str, host_port: int, *, clear_known_host: bool) 
 		)
 
 	if not HOST_SSH_PUBKEY.exists():
-		# Not fatal: user can still open shell via podman exec.
+		# Not fatal: user can still open a shell directly through the engine.
 		return f"{HOST_SSH_PUBKEY} not found; skipping SSH bootstrap."
 
 	# Quote key text because it is interpolated into a shell command string.
 	pub_key = shlex.quote(HOST_SSH_PUBKEY.read_text().strip())
 	ssh_dir = f"/home/{REMOTE_USER}/.ssh"
 
-	run(
+	container_exec(
+		container_id,
 		[
-			"podman",
-			"exec",
-			"-u",
-			REMOTE_USER,
-			container_id,
 			"bash",
 			"-c",
 			f"mkdir -p {ssh_dir} && "
@@ -76,22 +72,20 @@ def ssh_bootstrap(container_id: str, host_port: int, *, clear_known_host: bool) 
 			f"|| echo {pub_key} >> {ssh_dir}/authorized_keys && "
 			# OpenSSH ignores overly-open key files; enforce strict perms.
 			f"chmod 700 {ssh_dir} && chmod 600 {ssh_dir}/authorized_keys",
-		]
+		],
+		user=REMOTE_USER,
 	)
 
-	run(
+	container_exec(
+		container_id,
 		[
-			"podman",
-			"exec",
-			"-u",
-			"root",
-			container_id,
 			"bash",
 			"-c",
 			# dropbear flags:
 			# -E log to stderr, -s disable password logins, -g disable root logins,
 			# -R auto-generate host keys if missing.
 			f"pgrep -x dropbear >/dev/null || dropbear -p {SSH_CONTAINER_PORT} -E -s -g -R",
-		]
+		],
+		user="root",
 	)
 	return None

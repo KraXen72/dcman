@@ -9,6 +9,7 @@ description = "Manage devcontainers with lifecycle, SSH bootstrap, and auth toke
 requires-python = ">=3.11"
 dependencies = [
   "click>=8.1.7,<9",
+  "python-on-whales>=0.81.0",
 ]
 
 [project.scripts]

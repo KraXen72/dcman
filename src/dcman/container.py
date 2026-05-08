@@ -1,121 +1,114 @@
 from __future__ import annotations
 
-import json
+import os
+import shutil
 import subprocess
 import time
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+
+from python_on_whales import DockerClient
+from python_on_whales.components.container.cli_wrapper import Container
+from python_on_whales.exceptions import DockerException
 
 from .config import DEVCONTAINER_TEMPLATE_URL, WORKSPACE_DEST
 from .errors import CmdError
-from .process import run
 from .state import load_state, save_state
 
-# Handles devcontainer/container discovery and lifecycle by interrogating Podman
+# Handles devcontainer/container discovery and lifecycle by interrogating the
+# active container engine (podman/docker) via python-on-whales.
 # metadata, then mapping containers back to local workspaces.
 
 
-def _non_empty_lines(text: str) -> list[str]:
-	# Podman often emits trailing newlines; normalize once for all callers.
-	return [line.strip() for line in text.splitlines() if line.strip()]
+def _format_docker_exception(exc: DockerException) -> str:
+	parts = []
+	if exc.stderr:
+		parts.append(exc.stderr.decode(errors="replace").strip())
+	if exc.stdout:
+		parts.append(exc.stdout.decode(errors="replace").strip())
+	return "\n".join(part for part in parts if part)
 
 
-def _workspace_from_inspect(container: dict[str, Any]) -> str | None:
-	config = container.get("Config")
-	labels: dict[str, Any] = {}
-	if isinstance(config, dict):
-		raw_labels = config.get("Labels")
-		if isinstance(raw_labels, dict):
-			labels = raw_labels
+def _docker_cmd_error(message: str, exc: DockerException) -> CmdError:
+	if details := _format_docker_exception(exc):
+		return CmdError(f"{message}: {details}")
+	return CmdError(message)
 
+
+def _validate_engine_binary(name: str) -> str:
+	engine = name.strip()
+	if not engine:
+		raise CmdError("DCMAN_CONTAINER_ENGINE is set but empty.")
+	if shutil.which(engine) is None:
+		raise CmdError(f"configured container engine {engine!r} was not found in PATH.")
+	return engine
+
+
+def container_engine() -> str:
+	if requested := os.environ.get("DCMAN_CONTAINER_ENGINE"):
+		return _validate_engine_binary(requested)
+
+	for candidate in ("podman", "docker"):
+		if shutil.which(candidate) is not None:
+			return candidate
+
+	raise CmdError("neither podman nor docker was found in PATH.")
+
+
+@lru_cache(maxsize=1)
+def _client() -> DockerClient:
+	return DockerClient(client_call=[container_engine()])
+
+
+def _workspace_from_container(container: Container) -> str | None:
+	labels = container.config.labels or {}
 	workspace = labels.get("devcontainer.local_folder")
-	if isinstance(workspace, str) and workspace.strip():
+	if workspace:
 		# Normalize value from inspect output to match local path comparisons.
 		return str(Path(workspace).expanduser().resolve())
 
 	# Fallback for cases where label metadata is missing: infer workspace from
 	# the bind mount used by this project.
-	mounts = container.get("Mounts")
-	if not isinstance(mounts, list):
-		return None
-	for mount in mounts:
-		if not isinstance(mount, dict):
+	for mount in container.mounts:
+		if mount.destination != WORKSPACE_DEST:
 			continue
-		if mount.get("Destination") != WORKSPACE_DEST:
-			continue
-		source = mount.get("Source")
-		if isinstance(source, str) and source.strip():
+		source = mount.source
+		if source:
 			return str(Path(source).expanduser().resolve())
 	return None
 
 
-def _is_devcontainer(container: dict[str, Any]) -> bool:
-	config = container.get("Config")
-	if not isinstance(config, dict):
-		return False
-	labels = config.get("Labels")
-	if not isinstance(labels, dict):
-		return False
+def _is_devcontainer(container: Container) -> bool:
+	labels = container.config.labels or {}
 	# The devcontainer CLI stamps labels with the `devcontainer.` prefix.
-	return any(isinstance(key, str) and key.startswith("devcontainer.") for key in labels)
+	return any(key.startswith("devcontainer.") for key in labels)
+
+
+def _list_containers(*, all_containers: bool) -> list[Container]:
+	try:
+		return _client().container.list(all=all_containers)
+	except DockerException as exc:
+		raise _docker_cmd_error("failed to list containers", exc)
 
 
 def list_initialized_devcontainers() -> list[dict[str, str]]:
-	ids_result = run(["podman", "ps", "-a", "-q"], capture=True, check=False)
-	# `-a` includes exited containers; `-q` returns just IDs.
-	container_ids = _non_empty_lines(ids_result.stdout)
-	if not container_ids:
-		return []
-
-	# Batch inspect is much faster than shelling out once per container.
-	inspect_result = run(["podman", "inspect", *container_ids], capture=True, check=False)
-	if inspect_result.returncode != 0:
-		raise CmdError("failed to inspect podman containers")
-
-	try:
-		inspected = json.loads(inspect_result.stdout)
-	except json.JSONDecodeError as exc:
-		raise CmdError("failed to parse podman inspect output") from exc
-
-	if isinstance(inspected, dict):
-		# Podman can return one object or an array depending on invocation/path.
-		containers = [inspected]
-	elif isinstance(inspected, list):
-		containers = [entry for entry in inspected if isinstance(entry, dict)]
-	else:
-		containers = []
-
 	entries: list[dict[str, str]] = []
-	for container in containers:
+	for container in _list_containers(all_containers=True):
 		if not _is_devcontainer(container):
 			continue
-		workspace = _workspace_from_inspect(container)
+		workspace = _workspace_from_container(container)
 		if workspace is None:
 			continue
 
-		container_id = container.get("Id")
-		if not isinstance(container_id, str) or not container_id:
-			continue
-
-		name = container.get("Name")
-		# Podman names are usually prefixed with "/" in inspect output.
-		short_name = name.lstrip("/") if isinstance(name, str) else ""
-
-		status = "unknown"
-		state = container.get("State")
-		if isinstance(state, dict):
-			raw_status = state.get("Status")
-			if isinstance(raw_status, str) and raw_status:
-				status = raw_status
-		elif isinstance(state, str) and state:
-			status = state
+		container_id = container.id
+		status = container.state.status or "unknown"
 
 		entries.append(
 			{
 				"id": container_id,
 				"short_id": container_id[:12],
-				"name": short_name,
+				"name": container.name,
 				"status": status,
 				"workspace": workspace,
 			}
@@ -151,30 +144,19 @@ def render_devcontainer_table(entries: list[dict[str, str]]) -> str:
 
 
 def find_container(workspace: Path) -> str | None:
-	label = f"devcontainer.local_folder={workspace}"
-	result = run(["podman", "ps", "-q", "--filter", f"label={label}"], capture=True, check=False)
-	lines = _non_empty_lines(result.stdout)
-	if lines:
-		return lines[0]
+	target = str(workspace)
+	label = f"devcontainer.local_folder={target}"
+	try:
+		matches = _client().container.list(filters={"label": label})
+	except DockerException as exc:
+		raise _docker_cmd_error("failed to list containers for workspace lookup", exc)
+	if matches:
+		return matches[0].id
 
 	# Older/manual containers may not have expected labels; infer from mounts.
-	all_ids = run(["podman", "ps", "-q"], capture=True, check=False)
-	for container_id in _non_empty_lines(all_ids.stdout):
-		inspect = run(
-			[
-				"podman",
-				"inspect",
-				"-f",
-				# Go-template: print source path for the mount targeting
-				# /home/vscode/workspace so we can match local workspace path.
-				f'{{{{range .Mounts}}}}{{{{if eq .Destination "{WORKSPACE_DEST}"}}}}{{{{.Source}}}}{{{{end}}}}{{{{end}}}}',
-				container_id,
-			],
-			capture=True,
-			check=False,
-		)
-		if inspect.returncode == 0 and inspect.stdout.strip() == str(workspace):
-			return container_id
+	for container in _list_containers(all_containers=False):
+		if _workspace_from_container(container) == target:
+			return container.id
 	return None
 
 
@@ -251,7 +233,14 @@ def save_devcontainer_hash(workspace: Path) -> None:
 
 
 def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, env: dict[str, str]) -> None:
-	cmd = ["devcontainer", "up", "--docker-path", "podman", "--workspace-folder", str(workspace)]
+	cmd = [
+		"devcontainer",
+		"up",
+		"--docker-path",
+		container_engine(),
+		"--workspace-folder",
+		str(workspace),
+	]
 	if rebuild:
 		# Recreate container to apply changed run args/features safely.
 		cmd[2:2] = ["--remove-existing-container"]
@@ -263,6 +252,66 @@ def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, e
 		raise CmdError(f"devcontainer up failed ({result.returncode})")
 
 
-def podman_stop(container_id: str) -> int:
-	# `-t 1` keeps shutdown quick but still gives PID 1 a moment to exit cleanly.
-	return subprocess.run(["podman", "stop", "-t", "1", container_id]).returncode
+def container_exec(
+	container_id: str,
+	command: list[str],
+	*,
+	user: str | None = None,
+	workdir: str | None = None,
+	env: dict[str, str] | None = None,
+) -> str:
+	try:
+		return _client().container.execute(
+			container_id, command, user=user, workdir=workdir, envs=env or {}
+		)
+	except DockerException as exc:
+		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
+
+
+def container_exec_ok(container_id: str, command: list[str], *, user: str | None = None) -> bool:
+	try:
+		_client().container.execute(container_id, command, user=user)
+	except DockerException as exc:
+		if exc.return_code == 1:
+			return False
+		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
+	return True
+
+
+def container_exec_interactive(
+	container_id: str,
+	command: list[str],
+	*,
+	user: str | None = None,
+	workdir: str | None = None,
+	env: dict[str, str] | None = None,
+) -> int:
+	try:
+		_client().container.execute(
+			container_id,
+			command,
+			user=user,
+			workdir=workdir,
+			envs=env or {},
+			interactive=True,
+			tty=True,
+		)
+	except DockerException as exc:
+		return exc.return_code
+	return 0
+
+
+def stop_container(container_id: str) -> int:
+	# `time=1` keeps shutdown quick but still gives PID 1 a moment to exit cleanly.
+	try:
+		_client().container.stop(container_id, time=1)
+	except DockerException as exc:
+		return exc.return_code
+	return 0
+
+
+def remove_container(container_id: str) -> None:
+	try:
+		_client().container.remove(container_id, force=True)
+	except DockerException as exc:
+		raise _docker_cmd_error(f"failed to remove container {container_id[:12]}", exc)

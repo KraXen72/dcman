@@ -1,6 +1,6 @@
 # dcman
 
-`dcman` manages Podman-backed devcontainers from one CLI.
+`dcman` manages container-engine-backed devcontainers from one CLI.
 
 It does a few things together:
 1. Starts/reuses your devcontainer and rebuilds when config changes.
@@ -15,23 +15,25 @@ It does a few things together:
 ## system dependencies
 
 You need:
-- `podman` (docker support coming later)
-- Dev Container CLI (`devcontainer`)k
+- `podman` or `docker` (if both are installed, `dcman` prefers `podman` by default)
+- Dev Container CLI (`devcontainer`)
 - OpenSSH client and a host key at `~/.ssh/id_ed25519.pub` (modularization coming later)
 - `secret-tool` (optional, only needed for `dcman auth`)
 - `zed` (optional, only for `dcman zed`)
 
 **Fedora:**
 ```bash
-sudo dnf install podman nodejs openssh-clients libsecret
+sudo dnf install podman docker nodejs openssh-clients libsecret
 npm install -g @devcontainers/cli
 ```
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install podman nodejs npm openssh-client libsecret-tools
+sudo apt install podman docker.io nodejs npm openssh-client libsecret-tools
 npm install -g @devcontainers/cli
 ```
+
+Use `DCMAN_CONTAINER_ENGINE=docker` (or another engine binary name in `PATH`) to override engine selection.
 
 Your workspace must contain either `.devcontainer.json` or `.devcontainer/devcontainer.json`.
 
