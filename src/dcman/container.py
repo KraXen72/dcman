@@ -273,9 +273,7 @@ def container_exec(
 	# Non-interactive exec: captures and returns stdout as a string.
 	# Raises CmdError if the command exits non-zero.
 	try:
-		return _client().container.execute(
-			container_id, command, user=user, workdir=workdir, envs=env or {}
-		)
+		return _client().container.execute(container_id, command, user=user, workdir=workdir, envs=env or {})
 	except DockerException as exc:
 		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
 
