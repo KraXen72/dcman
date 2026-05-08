@@ -57,6 +57,9 @@ def require_binaries() -> None:
 
 
 def _resolve_preset(preset: str | None) -> str | None:
+	# Presets are named shorthand commands (defined in config.PRESETS) that run
+	# inside the container right before handing the user an interactive shell.
+	# Example: the "copilot" preset runs `copilot --yolo` then drops into bash.
 	if preset is None:
 		return None
 	if preset not in PRESETS:
@@ -353,6 +356,10 @@ def auth(provider: str, clear_token: bool) -> None:
 @click.option("--delay", required=True, type=int)
 @click.option("--token", required=True)
 def idle_stop(workspace: Path, delay: int, token: str) -> None:
+	# Internal command: launched as a detached background subprocess by
+	# schedule_idle_stop() in state.py whenever the last managed shell exits.
+	# After sleeping `delay` seconds it stops the container — unless a new
+	# shell session has started (token mismatch) or sessions are still active.
 	ws = workspace.expanduser().resolve()
 	# Sleep in child process keeps parent shell exit path fast.
 	time.sleep(delay)

@@ -35,6 +35,7 @@ def detect_shell(container_id: str, preset_cmd: str | None = None) -> list[str]:
 		if bash_ok:
 			# `exec` replaces the bootstrap shell so signal handling/job control
 			# behaves like a normal interactive login shell.
+			# `-il`: -i (interactive) -l (login) — equivalent to `--login` long form.
 			return ["/bin/bash", "--login", "-c", f"{preset_cmd}; exec /bin/bash -il"]
 		return ["/bin/sh", "-l", "-c", f"{preset_cmd}; exec /bin/sh -il"]
 	if bash_ok:
@@ -81,9 +82,10 @@ def ssh_bootstrap(container_id: str, host_port: int, *, clear_known_host: bool) 
 		[
 			"bash",
 			"-c",
-			# dropbear flags:
-			# -E log to stderr, -s disable password logins, -g disable root logins,
-			# -R auto-generate host keys if missing.
+			# `pgrep -x dropbear` checks for an already-running Dropbear daemon
+			# (-x = exact process name); the `||` means we only launch one if absent.
+			# Dropbear flags: -E log to stderr, -s disable password auth,
+			# -g disable root login, -R auto-generate host keys if missing.
 			f"pgrep -x dropbear >/dev/null || dropbear -p {SSH_CONTAINER_PORT} -E -s -g -R",
 		],
 		user="root",

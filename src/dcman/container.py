@@ -17,11 +17,13 @@ from .errors import CmdError
 from .state import load_state, save_state
 
 # Handles devcontainer/container discovery and lifecycle by interrogating the
-# active container engine (podman/docker) via python-on-whales.
-# metadata, then mapping containers back to local workspaces.
+# active container engine (podman/docker) via python-on-whales,
+# then mapping containers back to local workspaces.
 
 
 def _format_docker_exception(exc: DockerException) -> str:
+	# DockerException stores raw bytes from the engine's stdout/stderr; decode
+	# them so we can surface readable detail in CmdError messages.
 	parts = []
 	if exc.stderr:
 		parts.append(exc.stderr.decode(errors="replace").strip())
@@ -37,6 +39,8 @@ def _docker_cmd_error(message: str, exc: DockerException) -> CmdError:
 
 
 def _validate_engine_binary(name: str) -> str:
+	# Only called when the user has explicitly set DCMAN_CONTAINER_ENGINE,
+	# so an empty or missing binary is unambiguously a misconfiguration.
 	engine = name.strip()
 	if not engine:
 		raise CmdError("DCMAN_CONTAINER_ENGINE is set but empty.")
@@ -46,6 +50,8 @@ def _validate_engine_binary(name: str) -> str:
 
 
 def container_engine() -> str:
+	# Resolution order: explicit env override > podman > docker.
+	# Podman is preferred when both are installed because it runs rootless by default.
 	if requested := os.environ.get("DCMAN_CONTAINER_ENGINE"):
 		return _validate_engine_binary(requested)
 
@@ -58,6 +64,8 @@ def container_engine() -> str:
 
 @lru_cache(maxsize=1)
 def _client() -> DockerClient:
+	# Cached so all calls within one dcman invocation share the same client
+	# instance without re-resolving the engine binary on every operation.
 	return DockerClient(client_call=[container_engine()])
 
 
@@ -241,6 +249,8 @@ def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, e
 		"--workspace-folder",
 		str(workspace),
 	]
+	# Splice optional flags at index 2 (right after "up") so they come before
+	# --docker-path. cmd[2:2] is a zero-width slice insert, not a replacement.
 	if rebuild:
 		# Recreate container to apply changed run args/features safely.
 		cmd[2:2] = ["--remove-existing-container"]
@@ -260,6 +270,8 @@ def container_exec(
 	workdir: str | None = None,
 	env: dict[str, str] | None = None,
 ) -> str:
+	# Non-interactive exec: captures and returns stdout as a string.
+	# Raises CmdError if the command exits non-zero.
 	try:
 		return _client().container.execute(
 			container_id, command, user=user, workdir=workdir, envs=env or {}
@@ -269,6 +281,9 @@ def container_exec(
 
 
 def container_exec_ok(container_id: str, command: list[str], *, user: str | None = None) -> bool:
+	# Runs a command and returns True/False based on its exit code.
+	# Exit code 1 is the POSIX convention for "condition false" (e.g. `test -x`);
+	# any other non-zero code is an unexpected error and is re-raised.
 	try:
 		_client().container.execute(container_id, command, user=user)
 	except DockerException as exc:
@@ -286,19 +301,21 @@ def container_exec_interactive(
 	workdir: str | None = None,
 	env: dict[str, str] | None = None,
 ) -> int:
-	try:
-		_client().container.execute(
-			container_id,
-			command,
-			user=user,
-			workdir=workdir,
-			envs=env or {},
-			interactive=True,
-			tty=True,
-		)
-	except DockerException as exc:
-		return exc.return_code
-	return 0
+	# python-on-whales manages subprocess I/O internally and cannot provide a
+	# real interactive TTY (tab completion, arrow keys, and colors all break).
+	# For the shell the user actually lives in, we bypass the library and let
+	# subprocess inherit stdin/stdout/stderr directly from the calling process.
+	cmd = [container_engine(), "exec", "-it"]
+	if user:
+		cmd += ["-u", user]
+	if workdir:
+		cmd += ["-w", workdir]
+	for key, value in (env or {}).items():
+		# Pass values explicitly rather than relying on the parent env being
+		# forwarded, so only the intended vars reach the container.
+		cmd += ["-e", f"{key}={value}"]
+	cmd += [container_id, *command]
+	return subprocess.run(cmd).returncode
 
 
 def stop_container(container_id: str) -> int:

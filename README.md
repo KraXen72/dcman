@@ -41,6 +41,7 @@ If you want SSH/Zed support, your devcontainer `runArgs` should publish `2222` f
 ```json
 "runArgs": ["--publish=${localEnv:DCMAN_SSH_PORT}:2222"]
 ```
+and use [my `ssh-zed` devcontainer feature](https://github.com/KraXen72/devcontainer-features/tree/main/src/ssh-zed) or an equivalent (needs `dropbear`).  
 
 ## install
 
