@@ -11,19 +11,21 @@ import click
 from .auth import build_env, clear_provider_token, get_provider_token, store_provider_token
 from .config import AUTH_PROVIDERS, DEFAULT_IDLE_SECONDS, DESCRIPTION, PRESETS, REMOTE_USER, WORKSPACE_DEST
 from .container import (
+	container_engine,
+	container_exec_interactive,
 	devcontainer_hash,
 	devcontainer_up,
 	ensure_devcontainer_config,
 	find_container,
 	find_initialized_devcontainers,
 	list_initialized_devcontainers,
-	podman_stop,
+	remove_container,
 	render_devcontainer_table,
 	save_devcontainer_hash,
+	stop_container,
 	wait_for_container,
 )
 from .errors import CmdError, SecretToolUnavailable
-from .process import run
 from .ssh import alloc_ssh_port, detect_shell, ssh_bootstrap
 from .state import (
 	active_session_count,
@@ -48,11 +50,16 @@ def require_binaries() -> None:
 	# Fail early with clear guidance before running any long lifecycle command.
 	if shutil.which("devcontainer") is None:
 		raise click.ClickException("devcontainer CLI was not found in PATH.")
-	if shutil.which("podman") is None:
-		raise click.ClickException("podman was not found in PATH.")
+	try:
+		container_engine()
+	except CmdError as exc:
+		raise click.ClickException(str(exc))
 
 
 def _resolve_preset(preset: str | None) -> str | None:
+	# Presets are named shorthand commands (defined in config.PRESETS) that run
+	# inside the container right before handing the user an interactive shell.
+	# Example: the "copilot" preset runs `copilot --yolo` then drops into bash.
 	if preset is None:
 		return None
 	if preset not in PRESETS:
@@ -105,13 +112,13 @@ def _container_up(
 	return env, do_rebuild
 
 
-def _shell_env_args(env: dict[str, str]) -> list[str]:
-	# `podman exec -e NAME` forwards NAME from current process env by value.
-	env_args: list[str] = []
+def _shell_env(env: dict[str, str]) -> dict[str, str]:
+	# Only pass known provider vars through to the interactive container shell.
+	container_env: dict[str, str] = {}
 	for env_var in AUTH_PROVIDERS.values():
 		if env_var in env:
-			env_args.extend(["-e", env_var])
-	return env_args
+			container_env[env_var] = env[env_var]
+	return container_env
 
 
 def _run_managed_shell(
@@ -146,14 +153,16 @@ def _run_managed_shell(
 	# Session markers are the source of truth for "is this workspace still in use?".
 	register_session(ws, session_id)
 	shell_cmd = detect_shell(container_id, preset_cmd)
-	env_args = _shell_env_args(env)
+	shell_env = _shell_env(env)
 
 	try:
-		rc = subprocess.run(
-			# `-it` requests an interactive TTY; required for normal shell UX.
-			["podman", "exec", "-it", "-u", REMOTE_USER, "-w", WORKSPACE_DEST, *env_args, container_id, *shell_cmd],
-			env=env,
-		).returncode
+		rc = container_exec_interactive(
+			container_id,
+			shell_cmd,
+			user=REMOTE_USER,
+			workdir=WORKSPACE_DEST,
+			env=shell_env,
+		)
 	finally:
 		# Cleanup must always run, even when shell exits due to crash/signal.
 		unregister_session(ws, session_id)
@@ -230,13 +239,13 @@ def kill_cmd(workspace: str | None) -> None:
 	if not container_id:
 		click.echo(f"No running devcontainer found for {ws}.")
 		return
-	rc = podman_stop(container_id)
+	rc = stop_container(container_id)
 	if rc == 0:
 		click.echo(f"Stopped devcontainer for {ws}.")
 	raise SystemExit(rc)
 
 
-@click.command(name="list", help="list initialized podman devcontainers across workspaces")
+@click.command(name="list", help="list initialized devcontainers across workspaces")
 def list_cmd() -> None:
 	# Keep prune affordances visible because list+prune are commonly paired.
 	click.echo("Prune from anywhere: dcman prune --workspace /absolute/path/to/workspace")
@@ -244,7 +253,7 @@ def list_cmd() -> None:
 
 	entries = list_initialized_devcontainers()
 	if not entries:
-		click.echo("No initialized podman devcontainers found.")
+		click.echo("No initialized devcontainers found.")
 		return
 
 	click.echo("")
@@ -266,7 +275,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 		# Interactive mode helps when many workspaces are present.
 		entries = list_initialized_devcontainers()
 		if not entries:
-			click.echo("No initialized podman devcontainers found.")
+			click.echo("No initialized devcontainers found.")
 			return
 		click.echo(render_devcontainer_table(entries))
 		choice = click.prompt("Select container number", type=click.IntRange(1, len(entries)))
@@ -286,8 +295,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 		return
 
 	for entry in matches:
-		# `podman rm -f` removes both running and stopped containers.
-		run(["podman", "rm", "-f", entry["id"]])
+		remove_container(entry["id"])
 	clear_workspace_tracking(target_ws)
 	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
 
@@ -348,6 +356,10 @@ def auth(provider: str, clear_token: bool) -> None:
 @click.option("--delay", required=True, type=int)
 @click.option("--token", required=True)
 def idle_stop(workspace: Path, delay: int, token: str) -> None:
+	# Internal command: launched as a detached background subprocess by
+	# schedule_idle_stop() in state.py whenever the last managed shell exits.
+	# After sleeping `delay` seconds it stops the container — unless a new
+	# shell session has started (token mismatch) or sessions are still active.
 	ws = workspace.expanduser().resolve()
 	# Sleep in child process keeps parent shell exit path fast.
 	time.sleep(delay)
@@ -363,7 +375,7 @@ def idle_stop(workspace: Path, delay: int, token: str) -> None:
 
 	container_id = find_container(ws)
 	if container_id:
-		podman_stop(container_id)
+		stop_container(container_id)
 
 	state = load_state(ws)
 	if state.get("timer_token") == token:

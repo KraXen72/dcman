@@ -20,7 +20,7 @@ SSH_CONTAINER_PORT = 2222
 HOST_SSH_PUBKEY = Path.home() / ".ssh" / "id_ed25519.pub"
 DEVCONTAINER_TEMPLATE_URL = "ghcr.io/KraXen72/devcontainer-templates/fedora-sandbox"
 
-# provider -> environment variable name injected into `podman exec`.
+# provider -> environment variable name injected into container exec sessions.
 AUTH_PROVIDERS: dict[str, str] = {
 	"copilot": "COPILOT_GITHUB_TOKEN",
 }
