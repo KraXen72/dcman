@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -393,8 +394,15 @@ def main() -> None:
 	try:
 		cli()
 	except CmdError as exc:
-		# Convert internal errors into Click-style CLI errors (clean message + exit code).
-		raise click.ClickException(str(exc))
+		# If workspace lacks a devcontainer config, show only the friendly message
+		# without exception chaining or a Python traceback.
+		msg = str(exc)
+		if "No devcontainer config found in" in msg:
+			click.echo(msg)
+			# Exit with non-zero status to indicate failure.
+			sys.exit(1)
+		# Convert other internal errors into Click-style CLI errors (clean message + exit code).
+		raise click.ClickException(msg) from None
 
 
 if __name__ == "__main__":
