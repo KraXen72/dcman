@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import secrets
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import click
 
-from .auth import build_env, clear_provider_token, get_provider_token, store_provider_token
-from .config import AUTH_PROVIDERS, DEFAULT_IDLE_SECONDS, DESCRIPTION, PRESETS, REMOTE_USER, WORKSPACE_DEST
+from .auth import (
+	build_env,
+	clear_provider_token,
+	get_provider_token,
+	store_provider_token,
+)
+from .config import (
+	AUTH_PROVIDERS,
+	DEFAULT_IDLE_SECONDS,
+	DESCRIPTION,
+	PRESETS,
+	REMOTE_USER,
+	WORKSPACE_DEST,
+)
 from .container import (
 	container_engine,
 	container_exec_interactive,
@@ -27,7 +38,8 @@ from .container import (
 	wait_for_container,
 )
 from .errors import CmdError, SecretToolUnavailable
-from .ssh import alloc_ssh_port, detect_shell, ssh_bootstrap
+from .integrations import codex, zed
+from .ssh import alloc_ssh_port, detect_shell
 from .state import (
 	active_session_count,
 	clear_all_sessions,
@@ -80,6 +92,17 @@ def _prepare_workspace(raw_workspace: str | None) -> Path:
 	return ws
 
 
+def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
+	try:
+		message = codex.seed_auth_if_enabled(workspace, container_id, user=REMOTE_USER)
+	except CmdError as exc:
+		click.echo(f"Warning: failed to copy Codex CLI auth into the container: {exc}", err=True)
+		return
+
+	if message:
+		click.echo(message, err=message.startswith("Warning:"))
+
+
 def _container_up(
 	ws: Path, *, force_rebuild: bool = False, no_rebuild: bool = False, no_cache: bool = False
 ) -> tuple[dict[str, str], bool]:
@@ -92,6 +115,8 @@ def _container_up(
 
 	if force_rebuild:
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, env=env)
+		if container_id := wait_for_container(ws):
+			_copy_codex_cli_auth_if_needed(ws, container_id)
 		save_devcontainer_hash(ws)
 		return env, True
 
@@ -108,6 +133,8 @@ def _container_up(
 
 	do_rebuild = not no_rebuild and config_changed
 	devcontainer_up(ws, rebuild=do_rebuild, env=env)
+	if container_id := wait_for_container(ws):
+		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed or do_rebuild:
 		save_devcontainer_hash(ws)
 	return env, do_rebuild
@@ -140,15 +167,13 @@ def _run_managed_shell(
 
 	host_port = int(env["DCMAN_SSH_PORT"])
 	# Clear known_hosts only after rebuilds, when container host keys may rotate.
-	warning = ssh_bootstrap(container_id, host_port, clear_known_host=did_rebuild)
+	warning = zed.bootstrap_ssh(container_id, host_port, clear_known_host=did_rebuild)
 	if warning:
 		click.echo(f"Warning: {warning}", err=True)
 
 	if open_zed:
-		zed_uri = f"ssh://{REMOTE_USER}@127.0.0.1:{host_port}{WORKSPACE_DEST}"
+		zed_uri = zed.open_editor(host_port)
 		click.echo(f"Opening {zed_uri}")
-		# Fire-and-forget keeps dcman attached to terminal shell lifecycle.
-		subprocess.Popen(["zed", zed_uri])
 
 	session_id = secrets.token_hex(8)
 	# Session markers are the source of truth for "is this workspace still in use?".
@@ -222,7 +247,7 @@ def rebuild(workspace: str | None, no_cache: bool) -> None:
 	container_id = wait_for_container(ws)
 	if container_id:
 		# Rebuild path always clears known-host entry to avoid key-mismatch warnings.
-		warning = ssh_bootstrap(container_id, alloc_ssh_port(ws), clear_known_host=True)
+		warning = zed.bootstrap_ssh(container_id, alloc_ssh_port(ws), clear_known_host=True)
 		if warning:
 			click.echo(f"Warning: {warning}", err=True)
 

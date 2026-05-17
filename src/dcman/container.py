@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -191,6 +193,64 @@ def resolve_devcontainer_config_path(workspace: Path) -> Path | None:
 		return folder_config
 
 	return None
+
+
+def _feature_ref_matches(feature_ref: str, feature_id: str) -> bool:
+	name = feature_ref.rstrip("/").rsplit("/", 1)[-1].split(":", 1)[0]
+	return name == feature_id
+
+
+def _json_feature_keys(path: Path) -> list[str] | None:
+	try:
+		data = json.loads(path.read_text())
+	except (OSError, json.JSONDecodeError):
+		return None
+
+	features = data.get("features")
+	if not isinstance(features, dict):
+		return []
+	return [key for key in features if isinstance(key, str)]
+
+
+def _jsonc_like_feature_keys(path: Path) -> list[str]:
+	try:
+		lines = path.read_text(errors="replace").splitlines()
+	except OSError:
+		return []
+
+	keys: list[str] = []
+	in_features = False
+	depth = 0
+	for line in lines:
+		stripped = line.strip()
+		if stripped.startswith("//"):
+			continue
+
+		if not in_features:
+			if re.match(r'"features"\s*:\s*{', stripped):
+				in_features = True
+				depth = stripped.count("{") - stripped.count("}")
+			continue
+
+		if depth == 1 and (match := re.match(r'"([^"]+)"\s*:', stripped)):
+			keys.append(match.group(1))
+
+		depth += stripped.count("{") - stripped.count("}")
+		if depth <= 0:
+			break
+	return keys
+
+
+def workspace_uses_feature(workspace: Path, feature_id: str) -> bool:
+	for path in (workspace / ".devcontainer.json", workspace / ".devcontainer" / "devcontainer.json"):
+		if not path.is_file():
+			continue
+		feature_keys = _json_feature_keys(path)
+		if feature_keys is None:
+			feature_keys = _jsonc_like_feature_keys(path)
+		if any(_feature_ref_matches(key, feature_id) for key in feature_keys):
+			return True
+	return False
 
 
 def ensure_devcontainer_config(workspace: Path) -> None:
