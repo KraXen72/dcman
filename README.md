@@ -61,6 +61,9 @@ uvx --from git+https://github.com/KraXen72/dcman dcman --help
 # optional: store token for env injection
 dcman auth copilot
 
+# open shell and start Codex CLI when the codex-cli devcontainer feature is installed
+dcman start codex
+
 # open shell in managed devcontainer
 dcman start
 

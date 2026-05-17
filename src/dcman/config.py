@@ -28,4 +28,5 @@ AUTH_PROVIDERS: dict[str, str] = {
 # preset -> command to run automatically before handing over an interactive shell.
 PRESETS: dict[str, str] = {
 	"copilot": "copilot --yolo",
+	"codex": "codex --yolo",
 }
