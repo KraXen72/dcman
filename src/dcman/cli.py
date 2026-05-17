@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import secrets
-import shutil
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, TypeVar, cast
 
 import click
 
@@ -18,22 +19,26 @@ from .config import (
 	AUTH_PROVIDERS,
 	DEFAULT_IDLE_SECONDS,
 	DESCRIPTION,
+	DEVCONTAINER_TEMPLATES,
 	PRESETS,
 	REMOTE_USER,
-	WORKSPACE_DEST,
+	DevcontainerTemplatePreset,
 )
 from .container import (
 	container_engine,
 	container_exec_interactive,
 	devcontainer_hash,
+	devcontainer_template_apply,
 	devcontainer_up,
 	ensure_devcontainer_config,
 	find_container,
 	find_initialized_devcontainers,
 	format_devcontainer_config_diff,
 	list_initialized_devcontainers,
+	remote_workspace_folder,
 	remove_container,
 	render_devcontainer_table,
+	require_devcontainer_cli,
 	save_devcontainer_hash,
 	stop_container,
 	stored_devcontainer_config_snapshot,
@@ -61,27 +66,41 @@ from .state import (
 # User-facing command layer: validates prerequisites, orchestrates container/
 # state/auth/SSH modules, and keeps command behavior consistent across flows.
 
+T = TypeVar("T")
+
 
 def require_binaries() -> None:
 	# Fail early with clear guidance before running any long lifecycle command.
-	if shutil.which("devcontainer") is None:
-		raise click.ClickException("devcontainer CLI was not found in PATH.")
 	try:
+		require_devcontainer_cli()
 		container_engine()
 	except CmdError as exc:
 		raise click.ClickException(str(exc))
 
 
+def _format_aliases(aliases: Mapping[str, object]) -> str:
+	return ", ".join(aliases) or "(none)"
+
+
+def _resolve_alias(kind: str, alias: str, aliases: Mapping[str, T]) -> T:
+	try:
+		return aliases[alias]
+	except KeyError:
+		# Show available keys so typo recovery is immediate.
+		raise click.ClickException(f"unknown {kind} {alias!r}. defined {kind}s: {_format_aliases(aliases)}") from None
+
+
 def _resolve_preset(preset: str | None) -> str | None:
-	# Presets are named shorthand commands (defined in config.PRESETS) that run
-	# inside the container right before handing the user an interactive shell.
-	# Example: the "copilot" preset runs `copilot --yolo` then drops into bash.
+	# Presets are named shorthand commands that run inside the container right
+	# before handing the user an interactive shell.
 	if preset is None:
 		return None
-	if preset not in PRESETS:
-		# Show available keys so typo recovery is immediate.
-		raise click.ClickException(f"unknown preset {preset!r}. defined presets: {', '.join(PRESETS) or '(none)'}")
-	return PRESETS[preset]
+	return _resolve_alias("preset", preset, PRESETS)
+
+
+def _resolve_template(template: str) -> DevcontainerTemplatePreset:
+	# Blessed templates are named shorthand refs plus dcman-specific metadata.
+	return _resolve_alias("template", template, DEVCONTAINER_TEMPLATES)
 
 
 def _prepare_workspace(raw_workspace: str | None) -> Path:
@@ -134,6 +153,7 @@ def _devcontainer_env(ws: Path) -> dict[str, str]:
 	# The devcontainer's runArgs maps this host env var to published SSH port.
 	env["DCMAN_SSH_PORT"] = str(alloc_ssh_port(ws))
 	return env
+
 
 def _container_up(
 	ws: Path, *, force_rebuild: bool = False, no_rebuild: bool = False, no_cache: bool = False
@@ -221,9 +241,14 @@ def _run_managed_shell(
 	if warning:
 		click.echo(f"Warning: {warning}", err=True)
 
+	container_workspace = remote_workspace_folder(ws)
+
 	if open_zed:
-		zed_uri = zed.open_editor(host_port)
-		click.echo(f"Opening {zed_uri}")
+		zed_uri = zed.open_editor(host_port, container_workspace)
+		click.echo("Opening Zed project:")
+		click.echo(f"  local:  {ws}")
+		click.echo(f"  remote: {zed_uri}")
+		click.echo(f"  name:   {ws.name}")
 
 	session_id = secrets.token_hex(8)
 	# Session markers are the source of truth for "is this workspace still in use?".
@@ -236,7 +261,7 @@ def _run_managed_shell(
 			container_id,
 			shell_cmd,
 			user=REMOTE_USER,
-			workdir=WORKSPACE_DEST,
+			workdir=container_workspace,
 			env=shell_env,
 		)
 	finally:
@@ -377,6 +402,36 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
 
 
+@click.group(name="template", help="apply blessed devcontainer templates")
+def template_cmd() -> None:
+	pass
+
+
+@click.command(name="list", help="list blessed devcontainer template aliases")
+def template_list_cmd() -> None:
+	if not DEVCONTAINER_TEMPLATES:
+		click.echo("No blessed templates defined.")
+		return
+
+	for name, preset in DEVCONTAINER_TEMPLATES.items():
+		fast_path = ""
+		if preset.uid_fast_path is not None:
+			fast_path = f"\tuid-fast-path={preset.uid_fast_path.uid}:{preset.uid_fast_path.gid}"
+		click.echo(f"{name}\t{preset.ref}{fast_path}")
+
+
+@click.command(name="apply", help="apply a blessed devcontainer template alias")
+@click.argument("template", metavar="TEMPLATE")
+def template_apply_cmd(template: str) -> None:
+	preset = _resolve_template(template)
+	click.echo(f"Applying template {template!r} ({preset.ref})")
+	devcontainer_template_apply(preset.ref)
+
+
+cast(Any, template_cmd).add_command(template_list_cmd)
+cast(Any, template_cmd).add_command(template_apply_cmd)
+
+
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
 @click.argument("preset", required=False, metavar="[PRESET]")
 @click.option("-w", "--workspace", default=None, help="workspace folder (default: cwd)")
@@ -462,8 +517,8 @@ def idle_stop(workspace: Path, delay: int, token: str) -> None:
 		save_state(ws, state)
 
 
-for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, zed_cmd, auth, idle_stop):
-	cli.add_command(command)
+for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, zed_cmd, auth, idle_stop):
+	cast(Any, cli).add_command(command)
 
 
 def main() -> None:

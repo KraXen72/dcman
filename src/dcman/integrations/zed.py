@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 
-from ..config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT, WORKSPACE_DEST
+from ..config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT
 from ..container import container_exec
 
 
@@ -56,8 +56,8 @@ def bootstrap_ssh(container_id: str, host_port: int, *, clear_known_host: bool) 
 	return None
 
 
-def open_editor(host_port: int) -> str:
-	zed_uri = f"ssh://{REMOTE_USER}@127.0.0.1:{host_port}{WORKSPACE_DEST}"
+def open_editor(host_port: int, workspace_folder: str) -> str:
+	zed_uri = f"ssh://{REMOTE_USER}@127.0.0.1:{host_port}{workspace_folder}"
 	# Fire-and-forget keeps dcman attached to terminal shell lifecycle.
 	subprocess.Popen(["zed", zed_uri])
 	return zed_uri

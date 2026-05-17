@@ -36,12 +36,20 @@ npm install -g @devcontainers/cli
 Use `DCMAN_CONTAINER_ENGINE=docker` (or another engine binary name in `PATH`) to override engine selection.
 
 Your workspace must contain either `.devcontainer.json` or `.devcontainer/devcontainer.json`.
+To bootstrap one from a blessed template alias, run `dcman template apply fedora-sandbox`.
 
 If you want SSH/Zed support, your devcontainer `runArgs` should publish `2222` from the container, e.g.:
 ```json
 "runArgs": ["--publish=${localEnv:DCMAN_SSH_PORT}:2222"]
 ```
-and use [my `ssh-zed` devcontainer feature](https://github.com/KraXen72/devcontainer-features/tree/main/src/ssh-zed) or an equivalent (needs `dropbear`).  
+and use [my `ssh-zed` devcontainer feature](https://github.com/KraXen72/devcontainer-features/tree/main/src/ssh-zed) or an equivalent (needs `dropbear`).
+
+For nicer Zed project names, prefer a project-specific container workspace path instead of mounting every repo as `/home/vscode/workspace`:
+```json
+"workspaceMount": "source=${localWorkspaceFolder},target=/home/vscode/workspaces/${localWorkspaceFolderBasename},type=bind,Z",
+"workspaceFolder": "/home/vscode/workspaces/${localWorkspaceFolderBasename}"
+```
+`dcman` resolves `workspaceFolder` at runtime for shells and Zed, with `/home/vscode/workspace` kept only as a legacy fallback. Templates can also opt into readable container names, e.g. `--name=dcman_${localWorkspaceFolderBasename}`.  
 
 ## install
 
@@ -58,6 +66,9 @@ uvx --from git+https://github.com/KraXen72/dcman dcman --help
 ## quick usage
 
 ```bash
+# optional: apply the blessed fedora-sandbox devcontainer template
+dcman template apply fedora-sandbox
+
 # optional: store token for env injection
 dcman auth copilot
 

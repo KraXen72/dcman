@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -11,28 +10,36 @@ from difflib import unified_diff
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, cast
 
 from python_on_whales import DockerClient
 from python_on_whales.components.container.cli_wrapper import Container
 from python_on_whales.exceptions import DockerException
 
-from .config import DEVCONTAINER_TEMPLATE_URL, WORKSPACE_DEST
+from . import devcontainer_cli
+from .config import DEFAULT_DEVCONTAINER_TEMPLATE, DEFAULT_WORKSPACE_FOLDER, DEVCONTAINER_TEMPLATES, UidFastPath
 from .errors import CmdError
+from .rendering import render_diff, render_table
 from .state import load_state, save_state
 
 # Handles devcontainer/container discovery and lifecycle by interrogating the
 # active container engine (podman/docker) via python-on-whales,
-# then mapping containers back to local workspaces.
+# then mapping containers back to local workspaces. Dev Container CLI calls are
+# centralized in devcontainer_cli.py.
+
+
+def _format_process_output(value: object) -> str:
+	if isinstance(value, bytes):
+		return value.decode(errors="replace").strip()
+	if isinstance(value, str):
+		return value.strip()
+	return ""
 
 
 def _format_docker_exception(exc: DockerException) -> str:
-	# DockerException stores raw bytes from the engine's stdout/stderr; decode
-	# them so we can surface readable detail in CmdError messages.
-	parts = []
-	if exc.stderr:
-		parts.append(exc.stderr.decode(errors="replace").strip())
-	if exc.stdout:
-		parts.append(exc.stdout.decode(errors="replace").strip())
+	# DockerException stores output from the engine's stdout/stderr; normalize it
+	# so we can surface readable detail in CmdError messages.
+	parts = [_format_process_output(exc.stderr), _format_process_output(exc.stdout)]
 	return "\n".join(part for part in parts if part)
 
 
@@ -66,6 +73,10 @@ def _warn_if_docker(engine: str) -> None:
 	)
 
 
+def require_devcontainer_cli() -> None:
+	devcontainer_cli.require()
+
+
 def container_engine() -> str:
 	# Resolution order: explicit env override > podman > docker.
 	# Podman is preferred when both are installed because it runs rootless by default.
@@ -90,6 +101,16 @@ def _client() -> DockerClient:
 	return DockerClient(client_call=[container_engine()])
 
 
+def _resolved_mount_source(mount: Any) -> str | None:
+	source = getattr(mount, "source", None)
+	if not source:
+		return None
+	try:
+		return str(Path(source).expanduser().resolve())
+	except OSError:
+		return None
+
+
 def _workspace_from_container(container: Container) -> str | None:
 	labels = container.config.labels or {}
 	workspace = labels.get("devcontainer.local_folder")
@@ -97,14 +118,13 @@ def _workspace_from_container(container: Container) -> str | None:
 		# Normalize value from inspect output to match local path comparisons.
 		return str(Path(workspace).expanduser().resolve())
 
-	# Fallback for cases where label metadata is missing: infer workspace from
-	# the bind mount used by this project.
+	# Fallback for older/manual containers where label metadata is missing. Match
+	# by the host-side bind source instead of the container-side destination, since
+	# newer templates intentionally use project-specific workspaceFolder paths.
 	for mount in container.mounts:
-		if mount.destination != WORKSPACE_DEST:
-			continue
-		source = mount.source
-		if source:
-			return str(Path(source).expanduser().resolve())
+		source = _resolved_mount_source(mount)
+		if source and resolve_devcontainer_config_path(Path(source)) is not None:
+			return source
 	return None
 
 
@@ -153,23 +173,13 @@ def find_initialized_devcontainers(workspace: Path) -> list[dict[str, str]]:
 
 def render_devcontainer_table(entries: list[dict[str, str]]) -> str:
 	headers = ("#", "container (name/id)", "state", "workspace")
-	rows = []
+	rows: list[tuple[str, str, str, str]] = []
 	for idx, entry in enumerate(entries, start=1):
 		name_and_id = entry["short_id"]
 		if entry["name"]:
 			name_and_id = f"{entry['name']} ({entry['short_id']})"
 		rows.append((str(idx), name_and_id, entry["status"], entry["workspace"]))
-
-	widths = [len(header) for header in headers]
-	for row in rows:
-		for idx, value in enumerate(row):
-			widths[idx] = max(widths[idx], len(value))
-
-	fmt = "  ".join(f"{{:<{width}}}" for width in widths)
-	# Fixed-width text table keeps output readable without extra dependencies.
-	lines = [fmt.format(*headers), fmt.format(*["-" * width for width in widths])]
-	lines.extend(fmt.format(*row) for row in rows)
-	return "\n".join(lines)
+	return render_table(headers, rows)
 
 
 def find_container(workspace: Path) -> str | None:
@@ -184,8 +194,9 @@ def find_container(workspace: Path) -> str | None:
 
 	# Older/manual containers may not have expected labels; infer from mounts.
 	for container in _list_containers(all_containers=False):
-		if _workspace_from_container(container) == target:
-			return container.id
+		for mount in container.mounts:
+			if _resolved_mount_source(mount) == target:
+				return container.id
 	return None
 
 
@@ -214,61 +225,99 @@ def resolve_devcontainer_config_path(workspace: Path) -> Path | None:
 	return None
 
 
+@lru_cache(maxsize=32)
+def _devcontainer_config(workspace: Path) -> dict[str, Any]:
+	return devcontainer_cli.read_configuration(workspace, docker_path=container_engine())
+
+
+def _mapping(value: object) -> dict[str, Any]:
+	return value if isinstance(value, dict) else {}
+
+
+def _valid_absolute_container_path(value: str) -> str | None:
+	path = value.strip()
+	if not path.startswith("/") or "${" in path:
+		return None
+	return path
+
+
+def remote_workspace_folder(workspace: Path) -> str:
+	if resolve_devcontainer_config_path(workspace) is None:
+		return DEFAULT_WORKSPACE_FOLDER
+
+	payload = _devcontainer_config(workspace)
+	sections = (
+		_mapping(payload.get("workspace")),
+		_mapping(payload.get("mergedConfiguration")),
+		_mapping(payload.get("configuration")),
+	)
+	for section in sections:
+		workspace_folder = section.get("workspaceFolder")
+		if isinstance(workspace_folder, str):
+			resolved = _valid_absolute_container_path(workspace_folder)
+			if resolved is not None:
+				return resolved
+	return DEFAULT_WORKSPACE_FOLDER
+
+
+def devcontainer_feature_refs(workspace: Path) -> list[str]:
+	if resolve_devcontainer_config_path(workspace) is None:
+		return []
+
+	payload = _devcontainer_config(workspace)
+	for section_name in ("mergedConfiguration", "configuration"):
+		features = _mapping(payload.get(section_name)).get("features")
+		if isinstance(features, dict):
+			return [ref for ref in features if isinstance(ref, str)]
+	return []
+
+
 def _feature_ref_matches(feature_ref: str, feature_id: str) -> bool:
 	name = feature_ref.rstrip("/").rsplit("/", 1)[-1].split(":", 1)[0]
 	return name == feature_id
 
 
-def _json_feature_keys(path: Path) -> list[str] | None:
-	try:
-		data = json.loads(path.read_text())
-	except (OSError, json.JSONDecodeError):
-		return None
-
-	features = data.get("features")
-	if not isinstance(features, dict):
-		return []
-	return [key for key in features if isinstance(key, str)]
-
-
-def _jsonc_like_feature_keys(path: Path) -> list[str]:
-	try:
-		lines = path.read_text(errors="replace").splitlines()
-	except OSError:
-		return []
-
-	keys: list[str] = []
-	in_features = False
-	depth = 0
-	for line in lines:
-		stripped = line.strip()
-		if stripped.startswith("//"):
-			continue
-
-		if not in_features:
-			if re.match(r'"features"\s*:\s*{', stripped):
-				in_features = True
-				depth = stripped.count("{") - stripped.count("}")
-			continue
-
-		match = re.match(r'"([^"]+)"\s*:', stripped)
-		if depth == 1 and match:
-			keys.append(match.group(1))
-
-		depth += stripped.count("{") - stripped.count("}")
-		if depth <= 0:
-			break
-	return keys
-
-
 def workspace_uses_feature(workspace: Path, feature_id: str) -> bool:
-	for path in (workspace / ".devcontainer.json", workspace / ".devcontainer" / "devcontainer.json"):
-		if not path.is_file():
+	return any(_feature_ref_matches(ref, feature_id) for ref in devcontainer_feature_refs(workspace))
+
+
+def _raw_devcontainer_config(workspace: Path) -> dict[str, Any] | None:
+	config_path = resolve_devcontainer_config_path(workspace)
+	if config_path is None:
+		return None
+	try:
+		payload = json.loads(config_path.read_text(errors="replace"))
+	except (OSError, ValueError):
+		return None
+	return payload if isinstance(payload, dict) else None
+
+
+def _host_matches_uid_fast_path(spec: UidFastPath) -> bool:
+	if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
+		return False
+	return os.getuid() == spec.uid and os.getgid() == spec.gid
+
+
+def _config_matches_uid_fast_path(config: dict[str, Any], spec: UidFastPath) -> bool:
+	image = config.get("image")
+	remote_user = config.get("remoteUser")
+	return isinstance(image, str) and image.lower().startswith(spec.image_prefix.lower()) and remote_user == spec.remote_user
+
+
+def _use_template_uid_fast_path(workspace: Path) -> bool:
+	# The Dev Container CLI creates a second `-uid` image whenever remote UID
+	# updates are enabled. Some dcman template presets declare that their image
+	# already contains the configured remote user with a fixed UID/GID. When the
+	# host IDs match that preset, the rewrite layer is guaranteed to be a no-op.
+	config = _raw_devcontainer_config(workspace)
+	if config is None:
+		return False
+
+	for preset in DEVCONTAINER_TEMPLATES.values():
+		spec = preset.uid_fast_path
+		if spec is None:
 			continue
-		feature_keys = _json_feature_keys(path)
-		if feature_keys is None:
-			feature_keys = _jsonc_like_feature_keys(path)
-		if any(_feature_ref_matches(key, feature_id) for key in feature_keys):
+		if _host_matches_uid_fast_path(spec) and _config_matches_uid_fast_path(config, spec):
 			return True
 	return False
 
@@ -276,12 +325,13 @@ def workspace_uses_feature(workspace: Path, feature_id: str) -> bool:
 def ensure_devcontainer_config(workspace: Path) -> None:
 	if resolve_devcontainer_config_path(workspace) is not None:
 		return
+	template_hint = DEFAULT_DEVCONTAINER_TEMPLATE
 	raise CmdError(
 		"\n".join(
 			[
 				f"No devcontainer config found in {workspace}.",
 				"Expected either .devcontainer.json or .devcontainer/devcontainer.json.",
-				f"Hint: run `devcontainer templates apply -t {DEVCONTAINER_TEMPLATE_URL}`.",
+				f"Hint: run `dcman template apply {template_hint}`.",
 			]
 		)
 	)
@@ -368,7 +418,16 @@ def _format_diff_with_delta(diff: str) -> str | None:
 	if not diff or shutil.which("delta") is None:
 		return None
 	result = subprocess.run(
-		["delta", "--paging=never"],
+		[
+			"delta",
+			"--paging=never",
+			"--hunk-header-style",
+			"file line-number syntax",
+			"--file-style",
+			"omit",
+			"--hunk-header-decoration-style",
+			"blue ul",
+		],
 		input=diff,
 		stdout=subprocess.PIPE,
 		stderr=subprocess.DEVNULL,
@@ -380,31 +439,8 @@ def _format_diff_with_delta(diff: str) -> str | None:
 	return result.stdout
 
 
-def _colorize_diff(diff: str) -> str:
-	# Lightweight fallback for machines without delta. Respect NO_COLOR and
-	# avoid escape codes when output is being piped.
-	if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
-		return diff
-	colors = {
-		"add": "\033[32m",
-		"delete": "\033[31m",
-		"hunk": "\033[36m",
-		"meta": "\033[1m",
-		"reset": "\033[0m",
-	}
-	colored: list[str] = []
-	for line in diff.splitlines(keepends=True):
-		if line.startswith(("+++", "---")):
-			colored.append(f"{colors['meta']}{line}{colors['reset']}")
-		elif line.startswith("+"):
-			colored.append(f"{colors['add']}{line}{colors['reset']}")
-		elif line.startswith("-"):
-			colored.append(f"{colors['delete']}{line}{colors['reset']}")
-		elif line.startswith("@@"):
-			colored.append(f"{colors['hunk']}{line}{colors['reset']}")
-		else:
-			colored.append(line)
-	return "".join(colored)
+def _format_diff_with_rich(diff: str) -> str:
+	return render_diff(diff)
 
 
 def format_devcontainer_config_diff(workspace: Path) -> str | None:
@@ -412,8 +448,16 @@ def format_devcontainer_config_diff(workspace: Path) -> str | None:
 	if old_files is None:
 		return None
 	diff = _render_unified_config_diff(old_files, devcontainer_config_snapshot(workspace))
-	# Prefer word-level/high-level rendering, then fall back to raw unified diff.
-	return _format_diff_with_delta(diff) or _colorize_diff(diff)
+	if not diff:
+		return ""
+
+	renderer = os.environ.get("DCMAN_DIFF_RENDERER", "auto").strip().lower()
+	if renderer == "rich":
+		return _format_diff_with_rich(diff)
+	if renderer == "plain":
+		return diff
+	# Prefer word-level/high-level rendering, then fall back to Rich syntax highlighting.
+	return _format_diff_with_delta(diff) or _format_diff_with_rich(diff)
 
 
 def save_devcontainer_hash(workspace: Path) -> None:
@@ -432,30 +476,54 @@ def save_devcontainer_hash(workspace: Path) -> None:
 	save_state(workspace, state)
 
 
-def devcontainer_up(
-	workspace: Path,
-	*,
-	rebuild: bool,
-	no_cache: bool = False,
-	env: dict[str, str]
-) -> None:
-	cmd = [
-		"devcontainer",
+def devcontainer_feature_metadata(ref: str) -> tuple[str | None, str | None, str | None]:
+	# Let the official Dev Container CLI resolve floating tags and registry
+	# metadata, so dcman does not need to understand every registry detail.
+	payload = devcontainer_cli.run_json(
+		[
+			"features",
+			"info",
+			"verbose",
+			ref,
+			"--output-format",
+			"json",
+		]
+	)
+	canonical_id = payload.get("canonicalId")
+	annotations = payload.get("manifest", {}).get("annotations", {})
+	metadata_raw = annotations.get("dev.containers.metadata")
+	metadata = json.loads(metadata_raw) if isinstance(metadata_raw, str) else {}
+	name = metadata.get("name") if isinstance(metadata.get("name"), str) else None
+	version = metadata.get("version") if isinstance(metadata.get("version"), str) else None
+	return name, version, canonical_id if isinstance(canonical_id, str) else None
+
+
+def devcontainer_template_apply(template_ref: str) -> None:
+	result = devcontainer_cli.run(["templates", "apply", "-t", template_ref])
+	if result.returncode != 0:
+		raise CmdError(f"devcontainer templates apply failed ({result.returncode})")
+
+
+def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, env: dict[str, str]) -> None:
+	flags: list[str] = []
+	if no_cache:
+		# Forces a cold build when debugging feature/image-layer issues.
+		flags.append("--build-no-cache")
+	if rebuild:
+		# Recreate container to apply changed run args/features safely.
+		flags.append("--remove-existing-container")
+
+	args = [
 		"up",
+		*flags,
 		"--docker-path",
 		container_engine(),
+		"--update-remote-user-uid-default",
+		"never" if _use_template_uid_fast_path(workspace) else "on",
 		"--workspace-folder",
 		str(workspace),
 	]
-	# Splice optional flags at index 2 (right after "up") so they come before
-	# --docker-path. cmd[2:2] is a zero-width slice insert, not a replacement.
-	if rebuild:
-		# Recreate container to apply changed run args/features safely.
-		cmd[2:2] = ["--remove-existing-container"]
-	if no_cache:
-		# Forces a cold build when debugging feature/image-layer issues.
-		cmd[2:2] = ["--build-no-cache"]
-	result = subprocess.run(cmd, env=env)
+	result = devcontainer_cli.run(args, env=env)
 	if result.returncode != 0:
 		raise CmdError(f"devcontainer up failed ({result.returncode})")
 
@@ -471,7 +539,7 @@ def container_exec(
 	# Non-interactive exec: captures and returns stdout as a string.
 	# Raises CmdError if the command exits non-zero.
 	try:
-		return _client().container.execute(container_id, command, user=user, workdir=workdir, envs=env or {})
+		return cast(str, _client().container.execute(container_id, command, user=user, workdir=workdir, envs=env or {}))
 	except DockerException as exc:
 		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
 
