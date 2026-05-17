@@ -11,7 +11,8 @@ from .state import load_state, save_state
 
 def alloc_ssh_port(workspace: Path) -> int:
 	state = load_state(workspace)
-	if port := state.get("ssh_port"):
+	port = state.get("ssh_port")
+	if port:
 		# Reuse one host port per workspace to keep SSH endpoints stable.
 		return int(port)
 	# Bind to port 0 to ask the kernel for any currently-free ephemeral port.

@@ -30,14 +30,17 @@ from .container import (
 	ensure_devcontainer_config,
 	find_container,
 	find_initialized_devcontainers,
+	format_devcontainer_config_diff,
 	list_initialized_devcontainers,
 	remove_container,
 	render_devcontainer_table,
 	save_devcontainer_hash,
 	stop_container,
+	stored_devcontainer_config_snapshot,
 	wait_for_container,
 )
 from .errors import CmdError, SecretToolUnavailable
+from .features import format_feature_versions, resolve_feature_versions
 from .integrations import codex, zed
 from .ssh import alloc_ssh_port, detect_shell
 from .state import (
@@ -103,21 +106,54 @@ def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
 		click.echo(message, err=message.startswith("Warning:"))
 
 
-def _container_up(
-	ws: Path, *, force_rebuild: bool = False, no_rebuild: bool = False, no_cache: bool = False
-) -> tuple[dict[str, str], bool]:
-	ensure_devcontainer_config(ws)
+def _confirm_rebuild_for_config_change(ws: Path) -> bool:
+	click.echo("The devcontainer config changed:")
+	diff = format_devcontainer_config_diff(ws)
+	if diff:
+		click.echo(diff.rstrip())
+	elif stored_devcontainer_config_snapshot(ws) is None:
+		# First run after upgrading dcman may only have the old hash state.
+		click.echo("No previous accepted devcontainer config snapshot is available yet.")
+	else:
+		click.echo("No textual diff is available.")
+
+	answer = click.prompt("Rebuild before starting? [Y/n/a]", default="y", show_default=False).strip().lower()
+	if answer in {"y", "yes"}:
+		return True
+	if answer in {"n", "no"}:
+		return False
+	raise click.Abort()
+
+
+def _devcontainer_env(ws: Path) -> dict[str, str]:
+	# Keep token lookup and SSH port allocation in one place; both are needed
+	# only after the user has accepted any changed devcontainer config.
 	env, warnings = build_env(with_tokens=True)
 	for warning in warnings:
 		click.echo(f"Warning: {warning}", err=True)
 	# The devcontainer's runArgs maps this host env var to published SSH port.
 	env["DCMAN_SSH_PORT"] = str(alloc_ssh_port(ws))
+	return env
+
+def _container_up(
+	ws: Path, *, force_rebuild: bool = False, no_rebuild: bool = False, no_cache: bool = False
+) -> tuple[dict[str, str], bool]:
+	ensure_devcontainer_config(ws)
 
 	if force_rebuild:
-		devcontainer_up(ws, rebuild=True, no_cache=no_cache, env=env)
-		if container_id := wait_for_container(ws):
-			_copy_codex_cli_auth_if_needed(ws, container_id)
+		# Explicit `dcman rebuild` is already an affirmative action, so it does
+		# not need the change-review prompt used by automatic starts.
+		# Persist the accepted config before invoking the devcontainer CLI; even
+		# if the rebuild fails, future changes still have a real diff baseline.
 		save_devcontainer_hash(ws)
+		env = _devcontainer_env(ws)
+		feature_report = format_feature_versions(resolve_feature_versions(ws))
+		if feature_report:
+			click.echo(feature_report)
+		devcontainer_up(ws, rebuild=True, no_cache=no_cache, env=env)
+		container_id = wait_for_container(ws)
+		if container_id:
+			_copy_codex_cli_auth_if_needed(ws, container_id)
 		return env, True
 
 	current_hash = devcontainer_hash(ws)
@@ -125,17 +161,31 @@ def _container_up(
 	# Hash comparison is our lightweight "did devcontainer config change?" signal.
 	config_changed = current_hash is not None and current_hash != stored_hash
 
-	if no_rebuild and config_changed:
-		# Let power users skip rebuild for speed while still making drift explicit.
-		click.echo("Warning: devcontainer config has changed; run 'dcman rebuild' to apply.", err=True)
-	elif config_changed:
-		click.echo("Devcontainer config changed; rebuilding.")
+	do_rebuild = False
+	if config_changed:
+		# Prompt before env/token setup and before feature resolution. A changed
+		# config can point at new registries or alter mounts, so review comes first.
+		do_rebuild = _confirm_rebuild_for_config_change(ws)
+		if do_rebuild:
+			# Acceptance is separate from build success. Store the reviewed config
+			# now so a later failed build still gives the next change a diff base.
+			save_devcontainer_hash(ws)
+		if not do_rebuild:
+			click.echo("Starting without rebuilding; devcontainer config changes remain unapplied.")
+	elif current_hash is not None and stored_devcontainer_config_snapshot(ws) is None:
+		# Migrate users from the older hash-only state without forcing a rebuild.
+		save_devcontainer_hash(ws)
 
-	do_rebuild = not no_rebuild and config_changed
+	env = _devcontainer_env(ws)
+	if do_rebuild:
+		feature_report = format_feature_versions(resolve_feature_versions(ws))
+		if feature_report:
+			click.echo(feature_report)
 	devcontainer_up(ws, rebuild=do_rebuild, env=env)
-	if container_id := wait_for_container(ws):
+	container_id = wait_for_container(ws)
+	if container_id:
 		_copy_codex_cli_auth_if_needed(ws, container_id)
-	if not config_changed or do_rebuild:
+	if not config_changed:
 		save_devcontainer_hash(ws)
 	return env, do_rebuild
 
@@ -217,7 +267,7 @@ def cli() -> None:
 	type=int,
 	help="delay before auto-stopping after the last shell exits",
 )
-@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip rebuild even if devcontainer config changed (warns instead)")
+@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; config changes still prompt")
 def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebuild: bool) -> None:
 	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild)
 
@@ -232,7 +282,8 @@ def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebui
 	help="delay before auto-stopping after the last shell exits",
 )
 def shell(workspace: str | None, idle_seconds: int) -> None:
-	# `shell` alias intentionally skips auto-rebuild to stay snappy for quick re-entry.
+	# `shell` skips rebuild when config is unchanged, but changed config still
+	# prompts because rebuilding from an unreviewed config is the risky case.
 	_run_managed_shell(workspace, idle_seconds, preset=None, no_rebuild=True)
 
 
@@ -329,7 +380,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
 @click.argument("preset", required=False, metavar="[PRESET]")
 @click.option("-w", "--workspace", default=None, help="workspace folder (default: cwd)")
-@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip rebuild even if devcontainer config changed")
+@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; config changes still prompt")
 @click.option(
 	"--idle-seconds",
 	default=DEFAULT_IDLE_SECONDS,

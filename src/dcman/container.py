@@ -5,7 +5,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from difflib import unified_diff
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -35,7 +37,8 @@ def _format_docker_exception(exc: DockerException) -> str:
 
 
 def _docker_cmd_error(message: str, exc: DockerException) -> CmdError:
-	if details := _format_docker_exception(exc):
+	details = _format_docker_exception(exc)
+	if details:
 		return CmdError(f"{message}: {details}")
 	return CmdError(message)
 
@@ -51,14 +54,30 @@ def _validate_engine_binary(name: str) -> str:
 	return engine
 
 
+def _warn_if_docker(engine: str) -> None:
+	# Docker support is intentionally best-effort; warn once per process without
+	# making simple commands like `dcman list` noisy on every engine lookup.
+	if engine != "docker" or os.environ.get("DCMAN_DOCKER_WARNING_SHOWN") == "1":
+		return
+	os.environ["DCMAN_DOCKER_WARNING_SHOWN"] = "1"
+	print(
+		"Warning: Docker support in dcman is experimental; rootless Podman is the primary tested engine.",
+		file=sys.stderr,
+	)
+
+
 def container_engine() -> str:
 	# Resolution order: explicit env override > podman > docker.
 	# Podman is preferred when both are installed because it runs rootless by default.
-	if requested := os.environ.get("DCMAN_CONTAINER_ENGINE"):
-		return _validate_engine_binary(requested)
+	requested = os.environ.get("DCMAN_CONTAINER_ENGINE")
+	if requested:
+		engine = _validate_engine_binary(requested)
+		_warn_if_docker(engine)
+		return engine
 
 	for candidate in ("podman", "docker"):
 		if shutil.which(candidate) is not None:
+			_warn_if_docker(candidate)
 			return candidate
 
 	raise CmdError("neither podman nor docker was found in PATH.")
@@ -232,7 +251,8 @@ def _jsonc_like_feature_keys(path: Path) -> list[str]:
 				depth = stripped.count("{") - stripped.count("}")
 			continue
 
-		if depth == 1 and (match := re.match(r'"([^"]+)"\s*:', stripped)):
+		match = re.match(r'"([^"]+)"\s*:', stripped)
+		if depth == 1 and match:
 			keys.append(match.group(1))
 
 		depth += stripped.count("{") - stripped.count("}")
@@ -290,6 +310,112 @@ def devcontainer_hash(workspace: Path) -> str | None:
 	return h.hexdigest()
 
 
+def devcontainer_config_snapshot(workspace: Path) -> dict[str, str]:
+	# Store file text, not just a hash, so the next run can show a reviewable
+	# diff before rebuilding from a changed config.
+	files: dict[str, str] = {}
+
+	single_file = workspace / ".devcontainer.json"
+	if single_file.is_file():
+		files[".devcontainer.json"] = single_file.read_text(errors="replace")
+
+	dc_dir = workspace / ".devcontainer"
+	if dc_dir.is_dir():
+		for path in sorted(dc_dir.rglob("*")):
+			if path.is_file():
+				files[str(path.relative_to(workspace))] = path.read_text(errors="replace")
+
+	return files
+
+
+def stored_devcontainer_config_snapshot(workspace: Path) -> dict[str, str] | None:
+	# Be strict about the on-disk shape because state files are user-writable
+	# cache data; malformed snapshots should degrade to "no snapshot".
+	snapshot = load_state(workspace).get("devcontainer_snapshot")
+	if not isinstance(snapshot, dict):
+		return None
+	files = snapshot.get("files")
+	if not isinstance(files, dict):
+		return None
+	return {path: content for path, content in files.items() if isinstance(path, str) and isinstance(content, str)}
+
+
+def _render_unified_config_diff(old_files: dict[str, str], new_files: dict[str, str]) -> str:
+	lines: list[str] = []
+	for rel_path in sorted(set(old_files) | set(new_files)):
+		old_text = old_files.get(rel_path)
+		new_text = new_files.get(rel_path)
+		if old_text == new_text:
+			continue
+		# Use git-style names so delta and other diff tools can colorize added,
+		# removed, and changed files without needing real files on disk.
+		old_name = f"a/{rel_path}" if old_text is not None else "/dev/null"
+		new_name = f"b/{rel_path}" if new_text is not None else "/dev/null"
+		lines.extend(
+			unified_diff(
+				[] if old_text is None else old_text.splitlines(keepends=True),
+				[] if new_text is None else new_text.splitlines(keepends=True),
+				fromfile=old_name,
+				tofile=new_name,
+			)
+		)
+	return "".join(lines)
+
+
+def _format_diff_with_delta(diff: str) -> str | None:
+	# delta gives better inline highlighting when present, but the security
+	# prompt must work on a minimal system too, so this is a soft dependency.
+	if not diff or shutil.which("delta") is None:
+		return None
+	result = subprocess.run(
+		["delta", "--paging=never"],
+		input=diff,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.DEVNULL,
+		text=True,
+		check=False,
+	)
+	if result.returncode != 0:
+		return None
+	return result.stdout
+
+
+def _colorize_diff(diff: str) -> str:
+	# Lightweight fallback for machines without delta. Respect NO_COLOR and
+	# avoid escape codes when output is being piped.
+	if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+		return diff
+	colors = {
+		"add": "\033[32m",
+		"delete": "\033[31m",
+		"hunk": "\033[36m",
+		"meta": "\033[1m",
+		"reset": "\033[0m",
+	}
+	colored: list[str] = []
+	for line in diff.splitlines(keepends=True):
+		if line.startswith(("+++", "---")):
+			colored.append(f"{colors['meta']}{line}{colors['reset']}")
+		elif line.startswith("+"):
+			colored.append(f"{colors['add']}{line}{colors['reset']}")
+		elif line.startswith("-"):
+			colored.append(f"{colors['delete']}{line}{colors['reset']}")
+		elif line.startswith("@@"):
+			colored.append(f"{colors['hunk']}{line}{colors['reset']}")
+		else:
+			colored.append(line)
+	return "".join(colored)
+
+
+def format_devcontainer_config_diff(workspace: Path) -> str | None:
+	old_files = stored_devcontainer_config_snapshot(workspace)
+	if old_files is None:
+		return None
+	diff = _render_unified_config_diff(old_files, devcontainer_config_snapshot(workspace))
+	# Prefer word-level/high-level rendering, then fall back to raw unified diff.
+	return _format_diff_with_delta(diff) or _colorize_diff(diff)
+
+
 def save_devcontainer_hash(workspace: Path) -> None:
 	digest = devcontainer_hash(workspace)
 	if digest is None:
@@ -297,10 +423,22 @@ def save_devcontainer_hash(workspace: Path) -> None:
 		return
 	state = load_state(workspace)
 	state["devcontainer_hash"] = digest
+	# This snapshot represents the config the user has accepted as safe to use
+	# for rebuild decisions; it intentionally updates only after accepted starts.
+	state["devcontainer_snapshot"] = {
+		"version": 1,
+		"files": devcontainer_config_snapshot(workspace),
+	}
 	save_state(workspace, state)
 
 
-def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, env: dict[str, str]) -> None:
+def devcontainer_up(
+	workspace: Path,
+	*,
+	rebuild: bool,
+	no_cache: bool = False,
+	env: dict[str, str]
+) -> None:
 	cmd = [
 		"devcontainer",
 		"up",

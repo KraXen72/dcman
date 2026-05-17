@@ -23,21 +23,20 @@ set -eu
 user="$1"
 home="$(getent passwd "$user" | cut -d: -f6)"
 [ -n "$home" ]
-group="$(id -gn "$user")"
 target_dir="${home}/.codex"
 target="${target_dir}/auth.json"
 
-install -d -m 700 -o "$user" -g "$group" "$target_dir"
+umask 077
+mkdir -p "$target_dir"
 tmp="$(mktemp "${target_dir}/.auth.json.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
-chown "$user:$group" "$tmp"
 chmod 600 "$tmp"
 mv -f "$tmp" "$target"
 trap - EXIT
 """
 	result = subprocess.run(
-		[engine, "exec", "-i", container_id, "sh", "-c", script, "sh", user],
+		[engine, "exec", "-i", "-u", user, container_id, "sh", "-c", script, "sh", user],
 		input=auth_bytes,
 		stdout=subprocess.PIPE,
 		stderr=subprocess.PIPE,
@@ -45,7 +44,10 @@ trap - EXIT
 	if result.returncode != 0:
 		stderr = result.stderr.decode(errors="replace").strip()
 		detail = f": {stderr}" if stderr else ""
-		raise CmdError(f"failed to copy Codex auth into the container{detail}")
+		raise CmdError(
+			"failed to copy Codex auth into the container"
+			f"{detail}. If this is an old root-owned codex-shared volume, remove or migrate that volume and rebuild."
+		)
 
 
 def seed_auth_if_enabled(workspace: Path, container_id: str, *, user: str = REMOTE_USER) -> str | None:

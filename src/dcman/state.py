@@ -193,6 +193,8 @@ def clear_workspace_tracking(workspace: Path) -> None:
 	clear_timer(workspace)
 	clear_all_sessions(workspace)
 	state = load_state(workspace)
-	# Hash reset forces next `start` to treat workspace as needing fresh tracking.
+	# Hash/snapshot reset forces next `start` to treat workspace as needing
+	# fresh tracking instead of comparing against stale accepted config text.
 	state["devcontainer_hash"] = None
+	state["devcontainer_snapshot"] = None
 	save_state(workspace, state)
