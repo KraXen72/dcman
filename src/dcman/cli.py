@@ -11,6 +11,7 @@ from typing import Any, TypeVar, cast
 import click
 from rich.console import Console
 
+from . import agent_instructions
 from .auth import (
 	build_env,
 	clear_provider_token,
@@ -141,6 +142,18 @@ def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
 		click.echo(message, err=message.startswith("Warning:"))
 
 
+def _sync_agent_instructions_if_configured(container_id: str) -> None:
+	try:
+		message = agent_instructions.sync_to_container(container_id, user=REMOTE_USER)
+	except CmdError as exc:
+		# Do not block shell access on optional instruction sync.
+		click.echo(f"Warning: {exc}", err=True)
+		return
+
+	if message:
+		click.echo(message)
+
+
 def _confirm_rebuild_for_config_change(ws: Path) -> bool:
 	click.echo("The devcontainer config changed:")
 	diff = format_devcontainer_config_diff(ws)
@@ -196,6 +209,7 @@ def _container_up(
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, lockfile=lockfile, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
+			_sync_agent_instructions_if_configured(container_id)
 			_copy_codex_cli_auth_if_needed(ws, container_id)
 		return env, True
 
@@ -230,6 +244,7 @@ def _container_up(
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
+		_sync_agent_instructions_if_configured(container_id)
 		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed:
 		save_devcontainer_hash(ws)
