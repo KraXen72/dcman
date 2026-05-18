@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 import time
@@ -156,7 +157,12 @@ def _devcontainer_env(ws: Path) -> dict[str, str]:
 
 
 def _container_up(
-	ws: Path, *, force_rebuild: bool = False, no_rebuild: bool = False, no_cache: bool = False
+	ws: Path,
+	*,
+	force_rebuild: bool = False,
+	no_rebuild: bool = False,
+	no_cache: bool = False,
+	debug: bool = False,
 ) -> tuple[dict[str, str], bool]:
 	ensure_devcontainer_config(ws)
 
@@ -167,9 +173,10 @@ def _container_up(
 		# if the rebuild fails, future changes still have a real diff baseline.
 		save_devcontainer_hash(ws)
 		env = _devcontainer_env(ws)
-		feature_report = format_feature_versions(resolve_feature_versions(ws))
-		if feature_report:
-			click.echo(feature_report)
+		if debug:
+			feature_report = format_feature_versions(resolve_feature_versions(ws))
+			if feature_report:
+				click.echo(feature_report)
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
@@ -183,21 +190,24 @@ def _container_up(
 
 	do_rebuild = False
 	if config_changed:
-		# Prompt before env/token setup and before feature resolution. A changed
-		# config can point at new registries or alter mounts, so review comes first.
-		do_rebuild = _confirm_rebuild_for_config_change(ws)
-		if do_rebuild:
-			# Acceptance is separate from build success. Store the reviewed config
-			# now so a later failed build still gives the next change a diff base.
-			save_devcontainer_hash(ws)
-		if not do_rebuild:
-			click.echo("Starting without rebuilding; devcontainer config changes remain unapplied.")
+		if no_rebuild:
+			click.echo("Devcontainer config changed; starting without rebuilding.")
+		else:
+			# Prompt before env/token setup and before feature resolution. A changed
+			# config can point at new registries or alter mounts, so review comes first.
+			do_rebuild = _confirm_rebuild_for_config_change(ws)
+			if do_rebuild:
+				# Acceptance is separate from build success. Store the reviewed config
+				# now so a later failed build still gives the next change a diff base.
+				save_devcontainer_hash(ws)
+			if not do_rebuild:
+				click.echo("Starting without rebuilding; devcontainer config changes remain unapplied.")
 	elif current_hash is not None and stored_devcontainer_config_snapshot(ws) is None:
 		# Migrate users from the older hash-only state without forcing a rebuild.
 		save_devcontainer_hash(ws)
 
 	env = _devcontainer_env(ws)
-	if do_rebuild:
+	if do_rebuild and debug:
 		feature_report = format_feature_versions(resolve_feature_versions(ws))
 		if feature_report:
 			click.echo(feature_report)
@@ -211,12 +221,17 @@ def _container_up(
 
 
 def _shell_env(env: dict[str, str]) -> dict[str, str]:
-	# Only pass known provider vars through to the interactive container shell.
-	container_env: dict[str, str] = {}
+	container_env = _terminal_env()
 	for env_var in AUTH_PROVIDERS.values():
 		if env_var in env:
 			container_env[env_var] = env[env_var]
 	return container_env
+
+
+def _terminal_env() -> dict[str, str]:
+	# Preserve the host terminal capability name for TUIs inside the container.
+	term = os.environ.get("TERM")
+	return {"TERM": term} if term else {}
 
 
 def _run_managed_shell(
@@ -225,12 +240,13 @@ def _run_managed_shell(
 	preset: str | None,
 	no_rebuild: bool,
 	*,
+	debug: bool = False,
 	open_zed: bool = False,
 ) -> None:
 	ws = _prepare_workspace(workspace)
 	preset_cmd = _resolve_preset(preset)
 
-	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild)
+	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild, debug=debug)
 	container_id = wait_for_container(ws)
 	if not container_id:
 		raise click.ClickException(f"no matching devcontainer found for {ws}")
@@ -292,12 +308,14 @@ def cli() -> None:
 	type=int,
 	help="delay before auto-stopping after the last shell exits",
 )
-@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; config changes still prompt")
-def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebuild: bool) -> None:
-	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild)
+@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; changed config prints a notice")
+@click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
+def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebuild: bool, debug: bool) -> None:
+	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild, debug=debug)
 
 
 @click.command(help="start or reuse the devcontainer, then open a shell (alias: start)")
+@click.argument("preset", required=False, metavar="[PRESET]")
 @click.option("-w", "--workspace", default=None, help="workspace folder (default: cwd)")
 @click.option(
 	"--idle-seconds",
@@ -306,20 +324,20 @@ def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebui
 	type=int,
 	help="delay before auto-stopping after the last shell exits",
 )
-def shell(workspace: str | None, idle_seconds: int) -> None:
-	# `shell` skips rebuild when config is unchanged, but changed config still
-	# prompts because rebuilding from an unreviewed config is the risky case.
-	_run_managed_shell(workspace, idle_seconds, preset=None, no_rebuild=True)
+@click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
+def shell(preset: str | None, workspace: str | None, idle_seconds: int, debug: bool) -> None:
+	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild=True, debug=debug)
 
 
 @click.command(help="rebuild the devcontainer, reusing the layer cache unless --no-cache is passed")
 @click.argument("workspace", required=False)
 @click.option("--no-cache", "no_cache", is_flag=True, help="bypass BuildKit layer cache (full reinstall of all features)")
-def rebuild(workspace: str | None, no_cache: bool) -> None:
+@click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
+def rebuild(workspace: str | None, no_cache: bool, debug: bool) -> None:
 	ws = _prepare_workspace(workspace)
 	if active_session_count(ws) > 0:
 		click.echo("Warning: rebuilding while another managed shell session is still active.", err=True)
-	_container_up(ws, force_rebuild=True, no_cache=no_cache)
+	_container_up(ws, force_rebuild=True, no_cache=no_cache, debug=debug)
 	container_id = wait_for_container(ws)
 	if container_id:
 		# Rebuild path always clears known-host entry to avoid key-mismatch warnings.
@@ -435,7 +453,7 @@ cast(Any, template_cmd).add_command(template_apply_cmd)
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
 @click.argument("preset", required=False, metavar="[PRESET]")
 @click.option("-w", "--workspace", default=None, help="workspace folder (default: cwd)")
-@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; config changes still prompt")
+@click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; changed config prints a notice")
 @click.option(
 	"--idle-seconds",
 	default=DEFAULT_IDLE_SECONDS,
@@ -517,8 +535,13 @@ def idle_stop(workspace: Path, delay: int, token: str) -> None:
 		save_state(ws, state)
 
 
+def _add_command(group: click.Group, command: click.Command) -> None:
+	command.short_help = command.short_help or command.help
+	group.add_command(command)
+
+
 for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, zed_cmd, auth, idle_stop):
-	cast(Any, cli).add_command(command)
+	_add_command(cast(click.Group, cli), command)
 
 
 def main() -> None:
