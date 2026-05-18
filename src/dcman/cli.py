@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import click
+from rich.console import Console
 
 from .auth import (
 	build_env,
@@ -68,6 +69,20 @@ from .state import (
 # state/auth/SSH modules, and keeps command behavior consistent across flows.
 
 T = TypeVar("T")
+
+# allowlist of vars to preserve, not a set of "enable color" flags.
+TERMINAL_ENV_KEYS = (
+	"COLORTERM",
+	"TERM_PROGRAM",
+	"TERM_PROGRAM_VERSION",
+	"KONSOLE_VERSION",
+	"VTE_VERSION",
+	"WT_SESSION",
+	"CLICOLOR",
+	"CLICOLOR_FORCE",
+	"FORCE_COLOR",
+	"NO_COLOR",
+)
 
 
 def require_binaries() -> None:
@@ -162,6 +177,7 @@ def _container_up(
 	force_rebuild: bool = False,
 	no_rebuild: bool = False,
 	no_cache: bool = False,
+	lockfile: bool = False,
 	debug: bool = False,
 ) -> tuple[dict[str, str], bool]:
 	ensure_devcontainer_config(ws)
@@ -177,7 +193,7 @@ def _container_up(
 			feature_report = format_feature_versions(resolve_feature_versions(ws))
 			if feature_report:
 				click.echo(feature_report)
-		devcontainer_up(ws, rebuild=True, no_cache=no_cache, env=env)
+		devcontainer_up(ws, rebuild=True, no_cache=no_cache, lockfile=lockfile, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
 			_copy_codex_cli_auth_if_needed(ws, container_id)
@@ -211,7 +227,7 @@ def _container_up(
 		feature_report = format_feature_versions(resolve_feature_versions(ws))
 		if feature_report:
 			click.echo(feature_report)
-	devcontainer_up(ws, rebuild=do_rebuild, env=env)
+	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
 		_copy_codex_cli_auth_if_needed(ws, container_id)
@@ -229,9 +245,37 @@ def _shell_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def _terminal_env() -> dict[str, str]:
-	# Preserve the host terminal capability name for TUIs inside the container.
+	# Preserve host terminal capabilities for TUIs inside the container.
 	term = os.environ.get("TERM")
-	return {"TERM": term} if term else {}
+	container_env: dict[str, str] = {}
+	for key in TERMINAL_ENV_KEYS:
+		value = os.environ.get(key)
+		if value is not None:
+			container_env[key] = value
+	if term:
+		container_env["TERM"] = _term_for_container(term, container_env)
+	return container_env
+
+
+def _term_for_container(term: str, env: Mapping[str, str]) -> str:
+	if _rich_color_system({"TERM": term, **env}) not in {"256", "truecolor"}:
+		return term
+
+	if _term_advertises_extended_color(term):
+		return term
+	if term == "screen":
+		return "screen-256color"
+	if term == "tmux":
+		return "tmux-256color"
+	return "xterm-256color"
+
+
+def _rich_color_system(env: Mapping[str, str]) -> str | None:
+	return Console(force_terminal=True, color_system="auto", _environ=env).color_system
+
+
+def _term_advertises_extended_color(term: str) -> bool:
+	return "256color" in term or "direct" in term or "truecolor" in term
 
 
 def _run_managed_shell(
@@ -240,13 +284,14 @@ def _run_managed_shell(
 	preset: str | None,
 	no_rebuild: bool,
 	*,
+	lockfile: bool = False,
 	debug: bool = False,
 	open_zed: bool = False,
 ) -> None:
 	ws = _prepare_workspace(workspace)
 	preset_cmd = _resolve_preset(preset)
 
-	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild, debug=debug)
+	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if not container_id:
 		raise click.ClickException(f"no matching devcontainer found for {ws}")
@@ -309,9 +354,17 @@ def cli() -> None:
 	help="delay before auto-stopping after the last shell exits",
 )
 @click.option("--no-rebuild", "no_rebuild", is_flag=True, help="skip automatic rebuild; changed config prints a notice")
+@click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
-def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebuild: bool, debug: bool) -> None:
-	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild, debug=debug)
+def start(
+	preset: str | None,
+	workspace: str | None,
+	idle_seconds: int,
+	no_rebuild: bool,
+	lockfile: bool,
+	debug: bool,
+) -> None:
+	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild, lockfile=lockfile, debug=debug)
 
 
 @click.command(help="start or reuse the devcontainer, then open a shell (alias: start)")
@@ -324,20 +377,22 @@ def start(preset: str | None, workspace: str | None, idle_seconds: int, no_rebui
 	type=int,
 	help="delay before auto-stopping after the last shell exits",
 )
+@click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
-def shell(preset: str | None, workspace: str | None, idle_seconds: int, debug: bool) -> None:
-	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild=True, debug=debug)
+def shell(preset: str | None, workspace: str | None, idle_seconds: int, lockfile: bool, debug: bool) -> None:
+	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild=True, lockfile=lockfile, debug=debug)
 
 
 @click.command(help="rebuild the devcontainer, reusing the layer cache unless --no-cache is passed")
 @click.argument("workspace", required=False)
 @click.option("--no-cache", "no_cache", is_flag=True, help="bypass BuildKit layer cache (full reinstall of all features)")
+@click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
-def rebuild(workspace: str | None, no_cache: bool, debug: bool) -> None:
+def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, debug: bool) -> None:
 	ws = _prepare_workspace(workspace)
 	if active_session_count(ws) > 0:
 		click.echo("Warning: rebuilding while another managed shell session is still active.", err=True)
-	_container_up(ws, force_rebuild=True, no_cache=no_cache, debug=debug)
+	_container_up(ws, force_rebuild=True, no_cache=no_cache, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if container_id:
 		# Rebuild path always clears known-host entry to avoid key-mismatch warnings.
@@ -461,9 +516,10 @@ cast(Any, template_cmd).add_command(template_apply_cmd)
 	type=int,
 	help="delay before auto-stopping after the last shell exits",
 )
-def zed_cmd(workspace: str | None, no_rebuild: bool, preset: str | None, idle_seconds: int) -> None:
+@click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
+def zed_cmd(workspace: str | None, no_rebuild: bool, preset: str | None, idle_seconds: int, lockfile: bool) -> None:
 	# Reuses exactly the same lifecycle path as `start`, adding only Zed launch.
-	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild, open_zed=True)
+	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild, lockfile=lockfile, open_zed=True)
 
 
 @click.command(name="auth", help="store or clear credentials in secret-tool.  PROVIDER: " + " | ".join(AUTH_PROVIDERS))

@@ -88,6 +88,9 @@ dcman prune --workspace /absolute/path/to/workspace
 dcman kill
 ```
 
+`start`, `shell`, `rebuild`, and `zed` suppress Dev Container feature lockfile creation by default.
+Pass `--lockfile` if you want the Dev Container CLI to create or update `devcontainer-lock.json`.
+
 Run `dcman --help` for all commands and options.
 
 State is tracked under `~/.cache/dcman`.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,18 @@ _BINARY = "devcontainer"
 def require() -> None:
 	if shutil.which(_BINARY) is None:
 		raise CmdError("devcontainer CLI was not found in PATH.")
+
+
+@cache
+def supports_up_no_lockfile() -> bool:
+	require()
+	result = subprocess.run(
+		[_BINARY, "up", "--help"],
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+	)
+	return "--no-lockfile" in result.stdout or "--no-lockfile" in result.stderr
 
 
 def run(

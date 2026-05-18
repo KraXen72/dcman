@@ -504,7 +504,34 @@ def devcontainer_template_apply(template_ref: str) -> None:
 		raise CmdError(f"devcontainer templates apply failed ({result.returncode})")
 
 
-def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, env: dict[str, str]) -> None:
+def _devcontainer_lockfile_path(workspace: Path) -> Path | None:
+	config_path = resolve_devcontainer_config_path(workspace)
+	if config_path is None:
+		return None
+	# Match Dev Container CLI naming: a root `.devcontainer.json` gets a root
+	# `.devcontainer-lock.json`; `.devcontainer/devcontainer.json` gets
+	# `.devcontainer/devcontainer-lock.json`.
+	name = ".devcontainer-lock.json" if config_path.name.startswith(".") else "devcontainer-lock.json"
+	return config_path.parent / name
+
+
+def _delete_created_lockfile(lockfile_path: Path | None, *, existed_before: bool) -> None:
+	if lockfile_path is None or existed_before or not lockfile_path.is_file():
+		return
+	try:
+		lockfile_path.unlink()
+	except OSError as exc:
+		raise CmdError(f"devcontainer lockfile was created but could not be deleted: {lockfile_path}: {exc}") from exc
+
+
+def devcontainer_up(
+	workspace: Path,
+	*,
+	rebuild: bool,
+	no_cache: bool = False,
+	lockfile: bool = False,
+	env: dict[str, str],
+) -> None:
 	flags: list[str] = []
 	if no_cache:
 		# Forces a cold build when debugging feature/image-layer issues.
@@ -512,6 +539,13 @@ def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, e
 	if rebuild:
 		# Recreate container to apply changed run args/features safely.
 		flags.append("--remove-existing-container")
+	if not lockfile and devcontainer_cli.supports_up_no_lockfile():
+		# Dev Container CLI now generates feature lockfiles by default. dcman
+		# keeps that opt-in where the installed CLI supports suppression.
+		flags.append("--no-lockfile")
+
+	lockfile_path = _devcontainer_lockfile_path(workspace)
+	lockfile_existed_before = lockfile_path.is_file() if lockfile_path else False
 
 	args = [
 		"up",
@@ -524,6 +558,8 @@ def devcontainer_up(workspace: Path, *, rebuild: bool, no_cache: bool = False, e
 		str(workspace),
 	]
 	result = devcontainer_cli.run(args, env=env)
+	if not lockfile:
+		_delete_created_lockfile(lockfile_path, existed_before=lockfile_existed_before)
 	if result.returncode != 0:
 		raise CmdError(f"devcontainer up failed ({result.returncode})")
 
