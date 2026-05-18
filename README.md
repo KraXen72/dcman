@@ -89,7 +89,12 @@ dcman kill
 ```
 
 `start`, `shell`, `rebuild`, and `zed` suppress Dev Container feature lockfile creation by default.
-Pass `--lockfile` if you want the Dev Container CLI to create or update `devcontainer-lock.json`.
+This is a deliberate tradeoff:
+
+- an extra `devcontainer-lock.json` in each repo root is clutter for my workflow
+- my devcontainer features are first-party, so skipping lockfiles is acceptable for my use case
+
+Pass `--lockfile` to `start`, `shell`, `rebuild`, or `zed` if you want the Dev Container CLI to create or update `devcontainer-lock.json`.
 
 Run `dcman --help` for all commands and options.
 
