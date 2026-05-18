@@ -353,9 +353,11 @@ def _run_managed_shell(
 
 
 @click.group(help=DESCRIPTION)
-def cli() -> None:
-	# Group callback runs before subcommands, so this validates dependencies once.
-	require_binaries()
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+	# Host-only setup commands should not require container lifecycle tools.
+	if ctx.invoked_subcommand != "agents":
+		require_binaries()
 
 
 @click.command(help="start or reuse the devcontainer, then open a shell (alias: shell)")
@@ -520,6 +522,24 @@ cast(Any, template_cmd).add_command(template_list_cmd)
 cast(Any, template_cmd).add_command(template_apply_cmd)
 
 
+@click.group(name="agents", help="manage global agent instructions")
+def agents_cmd() -> None:
+	pass
+
+
+@click.command(name="link-host", help="symlink host agent instruction files to dcman's global AGENTS.md")
+def agents_link_host_cmd() -> None:
+	try:
+		messages = agent_instructions.configure_host_links()
+	except CmdError as exc:
+		raise click.ClickException(str(exc)) from None
+	for message in messages:
+		click.echo(message)
+
+
+cast(Any, agents_cmd).add_command(agents_link_host_cmd)
+
+
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
 @click.argument("preset", required=False, metavar="[PRESET]")
 @click.option("-w", "--workspace", default=None, help="workspace folder (default: cwd)")
@@ -611,7 +631,7 @@ def _add_command(group: click.Group, command: click.Command) -> None:
 	group.add_command(command)
 
 
-for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, zed_cmd, auth, idle_stop):
+for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, agents_cmd, zed_cmd, auth, idle_stop):
 	_add_command(cast(click.Group, cli), command)
 
 

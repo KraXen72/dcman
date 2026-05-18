@@ -118,6 +118,14 @@ On every `dcman start`, `dcman shell`, `dcman rebuild`, or `dcman zed`, dcman co
 
 If `XDG_CONFIG_HOME` is set, dcman uses `$XDG_CONFIG_HOME/dcman/AGENTS.md` instead. Set `DCMAN_AGENTS_MD=/path/to/AGENTS.md` to use a different host file. dcman copies the file instead of symlinking it, and it does not write anything into project roots. Project-local files such as `AGENTS.md`, nested `AGENTS.md`, and `.github/copilot-instructions.md` are still loaded by the respective tools as project-specific guidance.
 
+For agent sessions started directly on the host, create symlinks into each tool's host config:
+
+```bash
+dcman agents link-host
+```
+
+This creates the source file if needed and refuses to replace existing target files.
+
 ## local development
 
 ```bash
