@@ -1,10 +1,43 @@
 from __future__ import annotations
 
-import shlex
 import subprocess
 
 from ..config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT
-from ..container import container_exec
+from ..container import container_exec, container_exec_input, container_exec_ok
+
+USER_HOME = f"/home/{REMOTE_USER}"
+SSH_DIR = f"{USER_HOME}/.ssh"
+AUTHORIZED_KEYS = f"{SSH_DIR}/authorized_keys"
+ZED_STATE_DIR = f"{USER_HOME}/.local/share/zed"
+LOCAL_DIR = f"{USER_HOME}/.local"
+LOCAL_SHARE_DIR = f"{LOCAL_DIR}/share"
+
+
+def _create_zed_user_dirs(container_id: str) -> bool:
+	if not container_exec_ok(container_id, ["mkdir", "-p", SSH_DIR, ZED_STATE_DIR], user=REMOTE_USER):
+		return False
+	container_exec(container_id, ["chmod", "700", USER_HOME, SSH_DIR], user=REMOTE_USER)
+	return True
+
+
+def _ensure_zed_user_dirs(container_id: str) -> None:
+	# Zed starts its remote proxy by creating logs/sockets below
+	# ~/.local/share/zed. Some older images left ~/.local/share owned by root;
+	# repair only that runtime path so existing containers do not need pruning.
+	if _create_zed_user_dirs(container_id):
+		return
+
+	# Runtime root has a reduced capability set: it can chmod root-owned dirs,
+	# but cannot chown them. Use the sticky bit on .local/share as a narrow
+	# compatibility repair, then retry as the remote user.
+	container_exec(container_id, ["chmod", "o+x", USER_HOME], user=REMOTE_USER)
+	if container_exec_ok(container_id, ["test", "-d", LOCAL_DIR], user="root"):
+		container_exec(container_id, ["chmod", "u+rwx,go+rx", LOCAL_DIR], user="root")
+	container_exec(container_id, ["mkdir", "-p", LOCAL_SHARE_DIR], user="root")
+	container_exec(container_id, ["chmod", "1777", LOCAL_SHARE_DIR], user="root")
+	if not _create_zed_user_dirs(container_id):
+		container_exec(container_id, ["mkdir", "-p", SSH_DIR, ZED_STATE_DIR], user=REMOTE_USER)
+		container_exec(container_id, ["chmod", "700", USER_HOME, SSH_DIR], user=REMOTE_USER)
 
 
 def bootstrap_ssh(container_id: str, host_port: int, *, clear_known_host: bool) -> str | None:
@@ -21,38 +54,27 @@ def bootstrap_ssh(container_id: str, host_port: int, *, clear_known_host: bool) 
 		# Not fatal: user can still open a shell directly through the engine.
 		return f"{HOST_SSH_PUBKEY} not found; skipping SSH bootstrap."
 
-	# Quote key text because it is interpolated into a shell command string.
-	pub_key = shlex.quote(HOST_SSH_PUBKEY.read_text().strip())
-	ssh_dir = f"/home/{REMOTE_USER}/.ssh"
+	_ensure_zed_user_dirs(container_id)
 
-	container_exec(
+	pub_key = HOST_SSH_PUBKEY.read_text().strip()
+
+	container_exec(container_id, ["mkdir", "-p", SSH_DIR], user=REMOTE_USER)
+	has_authorized_keys = container_exec_ok(container_id, ["test", "-f", AUTHORIZED_KEYS], user=REMOTE_USER)
+	key_is_present = has_authorized_keys and container_exec_ok(
 		container_id,
-		[
-			"bash",
-			"-c",
-			f"mkdir -p {ssh_dir} && "
-			# `-q` quiet, `-x` exact line, `-F` fixed string: avoid duplicates.
-			f"grep -qxF {pub_key} {ssh_dir}/authorized_keys 2>/dev/null "
-			f"|| echo {pub_key} >> {ssh_dir}/authorized_keys && "
-			# OpenSSH ignores overly-open key files; enforce strict perms.
-			f"chmod 700 {ssh_dir} && chmod 600 {ssh_dir}/authorized_keys",
-		],
+		["grep", "-qxF", "--", pub_key, AUTHORIZED_KEYS],
 		user=REMOTE_USER,
 	)
+	if not key_is_present:
+		container_exec_input(container_id, ["tee", "-a", AUTHORIZED_KEYS], f"{pub_key}\n".encode(), user=REMOTE_USER)
+	# SSH implementations ignore overly-open key files; enforce strict perms.
+	container_exec(container_id, ["chmod", "700", SSH_DIR], user=REMOTE_USER)
+	container_exec(container_id, ["chmod", "600", AUTHORIZED_KEYS], user=REMOTE_USER)
 
-	container_exec(
-		container_id,
-		[
-			"bash",
-			"-c",
-			# `pgrep -x dropbear` checks for an already-running Dropbear daemon
-			# (-x = exact process name); the `||` means we only launch one if absent.
-			# Dropbear flags: -E log to stderr, -s disable password auth,
-			# -g disable root login, -R auto-generate host keys if missing.
-			f"pgrep -x dropbear >/dev/null || dropbear -p {SSH_CONTAINER_PORT} -E -s -g -R",
-		],
-		user="root",
-	)
+	if not container_exec_ok(container_id, ["pgrep", "-x", "dropbear"], user="root"):
+		# Dropbear flags: -E log to stderr, -s disable password auth,
+		# -g disable root login, -R auto-generate host keys if missing.
+		container_exec(container_id, ["dropbear", "-p", str(SSH_CONTAINER_PORT), "-E", "-s", "-g", "-R"], user="root")
 	return None
 
 

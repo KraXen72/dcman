@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-import subprocess
+import secrets
 from pathlib import Path
 
 from ..config import REMOTE_USER
-from ..container import container_engine, workspace_uses_feature
+from ..container import container_exec, container_exec_input, workspace_uses_feature
 from ..errors import CmdError
 
 CODEX_CLI_FEATURE_ID = "codex-cli"
 CODEX_HOST_AUTH = Path.home() / ".codex" / "auth.json"
+
+
+def _container_user_home(container_id: str, user: str) -> str:
+	passwd_entry = container_exec(container_id, ["getent", "passwd", user])
+	fields = passwd_entry.strip().split(":")
+	if len(fields) < 6 or not fields[5]:
+		raise CmdError(f"failed to resolve home directory for container user {user!r}")
+	return fields[5]
 
 
 def _copy_auth_to_container(container_id: str, *, user: str) -> None:
@@ -17,37 +25,26 @@ def _copy_auth_to_container(container_id: str, *, user: str) -> None:
 	except OSError as exc:
 		raise CmdError(f"failed to read host Codex auth file {CODEX_HOST_AUTH}: {exc}") from exc
 
-	engine = container_engine()
-	script = r"""
-set -eu
-user="$1"
-home="$(getent passwd "$user" | cut -d: -f6)"
-[ -n "$home" ]
-target_dir="${home}/.codex"
-target="${target_dir}/auth.json"
+	home = _container_user_home(container_id, user)
+	target_dir = f"{home}/.codex"
+	target = f"{target_dir}/auth.json"
+	tmp = f"{target_dir}/.auth.json.tmp.{secrets.token_hex(8)}"
 
-umask 077
-mkdir -p "$target_dir"
-tmp="$(mktemp "${target_dir}/.auth.json.tmp.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT
-cat > "$tmp"
-chmod 600 "$tmp"
-mv -f "$tmp" "$target"
-trap - EXIT
-"""
-	result = subprocess.run(
-		[engine, "exec", "-i", "-u", user, container_id, "sh", "-c", script, "sh", user],
-		input=auth_bytes,
-		stdout=subprocess.PIPE,
-		stderr=subprocess.PIPE,
-	)
-	if result.returncode != 0:
-		stderr = result.stderr.decode(errors="replace").strip()
-		detail = f": {stderr}" if stderr else ""
+	try:
+		container_exec(container_id, ["mkdir", "-p", target_dir], user=user)
+		container_exec(container_id, ["chmod", "700", target_dir], user=user)
+		container_exec_input(container_id, ["dd", f"of={tmp}", "status=none"], auth_bytes, user=user)
+		container_exec(container_id, ["chmod", "600", tmp], user=user)
+		container_exec(container_id, ["mv", "-f", tmp, target], user=user)
+	except CmdError as exc:
+		try:
+			container_exec(container_id, ["rm", "-f", tmp], user=user)
+		except CmdError:
+			pass
 		raise CmdError(
 			"failed to copy Codex auth into the container"
-			f"{detail}. If this is an old root-owned codex-shared volume, remove or migrate that volume and rebuild."
-		)
+			f": {exc}. If this is an old root-owned codex-shared volume, remove or migrate that volume and rebuild."
+		) from exc
 
 
 def seed_auth_if_enabled(workspace: Path, container_id: str, *, user: str = REMOTE_USER) -> str | None:

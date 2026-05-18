@@ -544,6 +544,32 @@ def container_exec(
 		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
 
 
+def container_exec_input(
+	container_id: str,
+	command: list[str],
+	input_bytes: bytes,
+	*,
+	user: str | None = None,
+	workdir: str | None = None,
+) -> str:
+	cmd = [container_engine(), "exec", "-i"]
+	if user:
+		cmd += ["-u", user]
+	if workdir:
+		cmd += ["-w", workdir]
+	cmd += [container_id, *command]
+	result = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	if result.returncode != 0:
+		details = "\n".join(
+			part for part in (_format_process_output(result.stderr), _format_process_output(result.stdout)) if part
+		)
+		message = f"failed to execute command in container {container_id[:12]}"
+		if details:
+			message = f"{message}: {details}"
+		raise CmdError(message)
+	return result.stdout.decode(errors="replace")
+
+
 def container_exec_ok(container_id: str, command: list[str], *, user: str | None = None) -> bool:
 	# Runs a command and returns True/False based on its exit code.
 	# Exit code 1 is the POSIX convention for "condition false" (e.g. `test -x`);
