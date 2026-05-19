@@ -120,6 +120,20 @@ def _resolve_template(template: str) -> DevcontainerTemplatePreset:
 	return _resolve_alias("template", template, DEVCONTAINER_TEMPLATES)
 
 
+def _clear_known_host_for_workspace(workspace: Path) -> None:
+	state = load_state(workspace)
+	port = state.get("ssh_port")
+	if isinstance(port, int):
+		host_port = port
+	elif isinstance(port, str) and port.isdigit():
+		host_port = int(port)
+	else:
+		return
+	if host_port > 0:
+		zed.clear_known_host(host_port)
+
+
+
 def _prepare_workspace(raw_workspace: str | None) -> Path:
 	ws = workspace_path(raw_workspace)
 	ensure_state_dirs(ws)
@@ -478,6 +492,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 	matches = find_initialized_devcontainers(target_ws)
 	if not matches:
 		# Even with no containers left, clearing tracking avoids stale local state.
+		_clear_known_host_for_workspace(target_ws)
 		clear_workspace_tracking(target_ws)
 		click.echo(f"No initialized devcontainers found for {target_ws}. Cleared dcman tracking state.")
 		return
@@ -488,6 +503,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 
 	for entry in matches:
 		remove_container(entry["id"])
+	_clear_known_host_for_workspace(target_ws)
 	clear_workspace_tracking(target_ws)
 	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
 

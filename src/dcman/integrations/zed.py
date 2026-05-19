@@ -40,15 +40,21 @@ def _ensure_zed_user_dirs(container_id: str) -> None:
 		container_exec(container_id, ["chmod", "700", USER_HOME, SSH_DIR], user=REMOTE_USER)
 
 
+def clear_known_host(host_port: int) -> None:
+	# Remove stale known_hosts entry to avoid scary MITM prompts when
+	# reconnecting to 127.0.0.1:<port>.
+	subprocess.run(
+		["ssh-keygen", "-R", f"[127.0.0.1]:{host_port}"],
+		stdout=subprocess.DEVNULL,
+		stderr=subprocess.DEVNULL,
+	)
+
+
 def bootstrap_ssh(container_id: str, host_port: int, *, clear_known_host: bool) -> str | None:
 	if clear_known_host:
 		# Rebuilds rotate host keys; remove stale known_hosts entry to avoid
 		# scary MITM prompts when reconnecting to 127.0.0.1:<port>.
-		subprocess.run(
-			["ssh-keygen", "-R", f"[127.0.0.1]:{host_port}"],
-			stdout=subprocess.DEVNULL,
-			stderr=subprocess.DEVNULL,
-		)
+		clear_known_host(host_port)
 
 	if not HOST_SSH_PUBKEY.exists():
 		# Not fatal: user can still open a shell directly through the engine.
