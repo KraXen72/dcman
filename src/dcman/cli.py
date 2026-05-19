@@ -11,6 +11,7 @@ from typing import Any, TypeVar, cast
 import click
 from rich.console import Console
 
+from . import agent_instructions
 from .auth import (
 	build_env,
 	clear_provider_token,
@@ -119,6 +120,20 @@ def _resolve_template(template: str) -> DevcontainerTemplatePreset:
 	return _resolve_alias("template", template, DEVCONTAINER_TEMPLATES)
 
 
+def _clear_known_host_for_workspace(workspace: Path) -> None:
+	state = load_state(workspace)
+	port = state.get("ssh_port")
+	if isinstance(port, int):
+		host_port = port
+	elif isinstance(port, str) and port.isdigit():
+		host_port = int(port)
+	else:
+		return
+	if host_port > 0:
+		zed.clear_known_host(host_port)
+
+
+
 def _prepare_workspace(raw_workspace: str | None) -> Path:
 	ws = workspace_path(raw_workspace)
 	ensure_state_dirs(ws)
@@ -139,6 +154,18 @@ def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
 
 	if message:
 		click.echo(message, err=message.startswith("Warning:"))
+
+
+def _sync_agent_instructions_if_configured(container_id: str) -> None:
+	try:
+		message = agent_instructions.sync_to_container(container_id, user=REMOTE_USER)
+	except CmdError as exc:
+		# Do not block shell access on optional instruction sync.
+		click.echo(f"Warning: {exc}", err=True)
+		return
+
+	if message:
+		click.echo(message)
 
 
 def _confirm_rebuild_for_config_change(ws: Path) -> bool:
@@ -196,6 +223,7 @@ def _container_up(
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, lockfile=lockfile, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
+			_sync_agent_instructions_if_configured(container_id)
 			_copy_codex_cli_auth_if_needed(ws, container_id)
 		return env, True
 
@@ -230,6 +258,7 @@ def _container_up(
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
+		_sync_agent_instructions_if_configured(container_id)
 		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed:
 		save_devcontainer_hash(ws)
@@ -338,9 +367,11 @@ def _run_managed_shell(
 
 
 @click.group(help=DESCRIPTION)
-def cli() -> None:
-	# Group callback runs before subcommands, so this validates dependencies once.
-	require_binaries()
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+	# Host-only setup commands should not require container lifecycle tools.
+	if ctx.invoked_subcommand != "agents":
+		require_binaries()
 
 
 @click.command(help="start or reuse the devcontainer, then open a shell (alias: shell)")
@@ -461,6 +492,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 	matches = find_initialized_devcontainers(target_ws)
 	if not matches:
 		# Even with no containers left, clearing tracking avoids stale local state.
+		_clear_known_host_for_workspace(target_ws)
 		clear_workspace_tracking(target_ws)
 		click.echo(f"No initialized devcontainers found for {target_ws}. Cleared dcman tracking state.")
 		return
@@ -471,6 +503,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 
 	for entry in matches:
 		remove_container(entry["id"])
+	_clear_known_host_for_workspace(target_ws)
 	clear_workspace_tracking(target_ws)
 	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
 
@@ -503,6 +536,24 @@ def template_apply_cmd(template: str) -> None:
 
 cast(Any, template_cmd).add_command(template_list_cmd)
 cast(Any, template_cmd).add_command(template_apply_cmd)
+
+
+@click.group(name="agents", help="manage global agent instructions")
+def agents_cmd() -> None:
+	pass
+
+
+@click.command(name="link-host", help="symlink host agent instruction files to dcman's global AGENTS.md")
+def agents_link_host_cmd() -> None:
+	try:
+		messages = agent_instructions.configure_host_links()
+	except CmdError as exc:
+		raise click.ClickException(str(exc)) from None
+	for message in messages:
+		click.echo(message)
+
+
+cast(Any, agents_cmd).add_command(agents_link_host_cmd)
 
 
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
@@ -596,7 +647,7 @@ def _add_command(group: click.Group, command: click.Command) -> None:
 	group.add_command(command)
 
 
-for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, zed_cmd, auth, idle_stop):
+for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, agents_cmd, zed_cmd, auth, idle_stop):
 	_add_command(cast(click.Group, cli), command)
 
 
