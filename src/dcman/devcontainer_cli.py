@@ -23,6 +23,7 @@ def require() -> None:
 
 @cache
 def supports_up_no_lockfile() -> bool:
+	# Support depends on the installed CLI version.
 	require()
 	result = subprocess.run(
 		[_BINARY, "up", "--help"],

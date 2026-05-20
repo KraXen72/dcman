@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
+import secrets
 import shutil
 import subprocess
 import sys
@@ -588,6 +590,7 @@ def container_exec_input(
 	user: str | None = None,
 	workdir: str | None = None,
 ) -> str:
+	# python-on-whales does not expose stdin for exec calls.
 	cmd = [container_engine(), "exec", "-i"]
 	if user:
 		cmd += ["-u", user]
@@ -617,6 +620,44 @@ def container_exec_ok(container_id: str, command: list[str], *, user: str | None
 			return False
 		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
 	return True
+
+
+def container_user_home(container_id: str, user: str) -> str:
+	# Avoid assuming /home/<user>; templates can pick a different home.
+	passwd_entry = container_exec(container_id, ["getent", "passwd", user])
+	fields = passwd_entry.strip().split(":")
+	if len(fields) < 6 or not fields[5]:
+		raise CmdError(f"failed to resolve home directory for container user {user!r}")
+	return fields[5]
+
+
+def write_container_file(
+	container_id: str,
+	target: str,
+	content: bytes,
+	*,
+	user: str | None = None,
+	mode: str = "600",
+	parent_mode: str | None = None,
+) -> None:
+	# Avoid leaving truncated files at paths tools read directly.
+	target_dir = posixpath.dirname(target)
+	target_name = posixpath.basename(target)
+	tmp = posixpath.join(target_dir, f".{target_name}.tmp.{secrets.token_hex(8)}")
+
+	try:
+		container_exec(container_id, ["mkdir", "-p", target_dir], user=user)
+		if parent_mode is not None:
+			container_exec(container_id, ["chmod", parent_mode, target_dir], user=user)
+		container_exec_input(container_id, ["dd", f"of={tmp}", "status=none"], content, user=user)
+		container_exec(container_id, ["chmod", mode, tmp], user=user)
+		container_exec(container_id, ["mv", "-f", tmp, target], user=user)
+	except CmdError:
+		try:
+			container_exec(container_id, ["rm", "-f", tmp], user=user)
+		except CmdError:
+			pass
+		raise
 
 
 def container_exec_interactive(

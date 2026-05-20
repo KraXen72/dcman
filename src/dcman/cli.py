@@ -11,6 +11,7 @@ from typing import Any, TypeVar, cast
 import click
 from rich.console import Console
 
+from . import agent_instructions
 from .auth import (
 	build_env,
 	clear_provider_token,
@@ -119,6 +120,19 @@ def _resolve_template(template: str) -> DevcontainerTemplatePreset:
 	return _resolve_alias("template", template, DEVCONTAINER_TEMPLATES)
 
 
+def _clear_known_host_for_workspace(workspace: Path) -> None:
+	state = load_state(workspace)
+	port = state.get("ssh_port")
+	if isinstance(port, int):
+		host_port = port
+	elif isinstance(port, str) and port.isdigit():
+		host_port = int(port)
+	else:
+		return
+	if host_port > 0:
+		zed.clear_known_host(host_port)
+
+
 def _prepare_workspace(raw_workspace: str | None) -> Path:
 	ws = workspace_path(raw_workspace)
 	ensure_state_dirs(ws)
@@ -139,6 +153,18 @@ def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
 
 	if message:
 		click.echo(message, err=message.startswith("Warning:"))
+
+
+def _sync_agent_instructions_if_configured(container_id: str) -> None:
+	try:
+		message = agent_instructions.sync_to_container(container_id, user=REMOTE_USER)
+	except CmdError as exc:
+		# Do not block shell access on optional instruction sync.
+		click.echo(f"Warning: {exc}", err=True)
+		return
+
+	if message:
+		click.echo(message)
 
 
 def _confirm_rebuild_for_config_change(ws: Path) -> bool:
@@ -171,6 +197,10 @@ def _devcontainer_env(ws: Path) -> dict[str, str]:
 	return env
 
 
+def _initialized_container_ids(ws: Path) -> set[str]:
+	return {entry["id"] for entry in find_initialized_devcontainers(ws)}
+
+
 def _container_up(
 	ws: Path,
 	*,
@@ -190,12 +220,14 @@ def _container_up(
 		save_devcontainer_hash(ws)
 		env = _devcontainer_env(ws)
 		if debug:
+			click.echo("Resolving devcontainer feature versions...")
 			feature_report = format_feature_versions(resolve_feature_versions(ws))
 			if feature_report:
 				click.echo(feature_report)
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, lockfile=lockfile, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
+			_sync_agent_instructions_if_configured(container_id)
 			_copy_codex_cli_auth_if_needed(ws, container_id)
 		return env, True
 
@@ -227,13 +259,16 @@ def _container_up(
 		feature_report = format_feature_versions(resolve_feature_versions(ws))
 		if feature_report:
 			click.echo(feature_report)
+	previous_container_ids = _initialized_container_ids(ws)
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
+		_sync_agent_instructions_if_configured(container_id)
 		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed:
 		save_devcontainer_hash(ws)
-	return env, do_rebuild
+	container_was_recreated = container_id is not None and container_id not in previous_container_ids
+	return env, do_rebuild or container_was_recreated
 
 
 def _shell_env(env: dict[str, str]) -> dict[str, str]:
@@ -291,14 +326,15 @@ def _run_managed_shell(
 	ws = _prepare_workspace(workspace)
 	preset_cmd = _resolve_preset(preset)
 
-	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild, lockfile=lockfile, debug=debug)
+	env, should_clear_known_host = _container_up(ws, no_rebuild=no_rebuild, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if not container_id:
 		raise click.ClickException(f"no matching devcontainer found for {ws}")
 
 	host_port = int(env["DCMAN_SSH_PORT"])
-	# Clear known_hosts only after rebuilds, when container host keys may rotate.
-	warning = zed.bootstrap_ssh(container_id, host_port, clear_known_host=did_rebuild)
+	# Clear known_hosts only when this invocation may have put a new
+	# container-side SSH host key behind dcman's stable forwarded port.
+	warning = zed.bootstrap_ssh(container_id, host_port, do_clear_known_host=should_clear_known_host)
 	if warning:
 		click.echo(f"Warning: {warning}", err=True)
 
@@ -338,9 +374,11 @@ def _run_managed_shell(
 
 
 @click.group(help=DESCRIPTION)
-def cli() -> None:
-	# Group callback runs before subcommands, so this validates dependencies once.
-	require_binaries()
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+	# Host-only setup commands should not require container lifecycle tools.
+	if ctx.invoked_subcommand != "agents":
+		require_binaries()
 
 
 @click.command(help="start or reuse the devcontainer, then open a shell (alias: shell)")
@@ -387,16 +425,20 @@ def shell(preset: str | None, workspace: str | None, idle_seconds: int, lockfile
 @click.argument("workspace", required=False)
 @click.option("--no-cache", "no_cache", is_flag=True, help="bypass BuildKit layer cache (full reinstall of all features)")
 @click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
+@click.option("-f", "--force", is_flag=True, help="force rebuild even if another managed shell session is still active")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
-def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, debug: bool) -> None:
+def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, force: bool, debug: bool) -> None:
 	ws = _prepare_workspace(workspace)
-	if active_session_count(ws) > 0:
-		click.echo("Warning: rebuilding while another managed shell session is still active.", err=True)
+	if active_session_count(ws) > 0 and not force:
+		click.echo(
+			"Error: cannot rebuild while another managed shell session is still active. Pass --force to rebuild anyway.", err=True
+		)
+		return
 	_container_up(ws, force_rebuild=True, no_cache=no_cache, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if container_id:
 		# Rebuild path always clears known-host entry to avoid key-mismatch warnings.
-		warning = zed.bootstrap_ssh(container_id, alloc_ssh_port(ws), clear_known_host=True)
+		warning = zed.bootstrap_ssh(container_id, alloc_ssh_port(ws), do_clear_known_host=True)
 		if warning:
 			click.echo(f"Warning: {warning}", err=True)
 
@@ -435,18 +477,31 @@ def list_cmd() -> None:
 	click.echo(render_devcontainer_table(entries))
 
 
-@click.command(name="prune", help="delete initialized devcontainer(s) for a workspace and clear dcman tracking")
-@click.option("-w", "--workspace", default=None, help="workspace folder to prune")
-@click.option("--select", "select_mode", is_flag=True, help="interactively choose from initialized devcontainers")
+@click.command(name="prune")
+@click.argument("target", default=".")
 @click.option("-y", "--yes", is_flag=True, help="skip confirmation prompt")
-def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
-	if workspace and select_mode:
-		raise click.ClickException("use either --workspace or --select, not both")
-	if not workspace and not select_mode:
-		raise click.ClickException("pass --workspace or --select")
+def prune_cmd(target: str, yes: bool) -> None:
+	"""
+	delete initialized devcontainer(s) for a workspace and clear dcman tracking.
+
+	TARGET can be a <path to workspace>, '.' (cwd), 'select' (interactive), or 'all'.
+	"""
+	if target == "all":
+		click.echo("current containers: ")
+		containers = list_initialized_devcontainers()
+		click.echo(render_devcontainer_table(containers))
+
+		if not yes and not click.confirm(f"Delete {len(containers)} container(s)?", default=True):
+			click.echo("Nothing changed.")
+			return
+
+		for path in [Path(cont["workspace"]) for cont in containers]:
+			for cont in find_initialized_devcontainers(path):
+				remove_container(cont["id"])
+		return
 
 	target_ws: Path
-	if select_mode:
+	if target == "select":
 		# Interactive mode helps when many workspaces are present.
 		entries = list_initialized_devcontainers()
 		if not entries:
@@ -456,11 +511,13 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 		choice = click.prompt("Select container number", type=click.IntRange(1, len(entries)))
 		target_ws = Path(entries[choice - 1]["workspace"])
 	else:
-		target_ws = workspace_path(workspace)
+		target_path = str(Path.cwd() if target == "." else target)
+		target_ws = workspace_path(target_path)
 
 	matches = find_initialized_devcontainers(target_ws)
 	if not matches:
 		# Even with no containers left, clearing tracking avoids stale local state.
+		_clear_known_host_for_workspace(target_ws)
 		clear_workspace_tracking(target_ws)
 		click.echo(f"No initialized devcontainers found for {target_ws}. Cleared dcman tracking state.")
 		return
@@ -471,6 +528,7 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 
 	for entry in matches:
 		remove_container(entry["id"])
+	_clear_known_host_for_workspace(target_ws)
 	clear_workspace_tracking(target_ws)
 	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
 
@@ -503,6 +561,40 @@ def template_apply_cmd(template: str) -> None:
 
 cast(Any, template_cmd).add_command(template_list_cmd)
 cast(Any, template_cmd).add_command(template_apply_cmd)
+
+
+@click.group(name="agents", help="manage global agent instructions")
+def agents_cmd() -> None:
+	pass
+
+
+@click.command(name="link-host", help="symlink host agent instruction files to dcman's global AGENTS.md")
+def agents_link_host_cmd() -> None:
+	try:
+		messages = agent_instructions.configure_host_links()
+	except CmdError as exc:
+		raise click.ClickException(str(exc)) from None
+	for message in messages:
+		click.echo(message)
+
+
+@click.command(name="unlink-host", help="un-symlink host agent instruction files to dcman's global AGENTS.md")
+@click.option("-y", "--yes", is_flag=True, help="auto-accept the confirmation prompt")
+def agents_unlink_host_cmd(yes: bool) -> None:
+	if not yes and not click.confirm("Unlink all host agent paths?", default=True):
+		click.echo("Nothing changed.")
+		return
+
+	try:
+		messages = agent_instructions.unlink_host_links()
+	except CmdError as exc:
+		raise click.ClickException(str(exc)) from None
+	for message in messages:
+		click.echo(message)
+
+
+cast(Any, agents_cmd).add_command(agents_link_host_cmd)
+cast(Any, agents_cmd).add_command(agents_unlink_host_cmd)
 
 
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")
@@ -596,7 +688,7 @@ def _add_command(group: click.Group, command: click.Command) -> None:
 	group.add_command(command)
 
 
-for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, zed_cmd, auth, idle_stop):
+for command in (start, shell, rebuild, kill_cmd, list_cmd, prune_cmd, template_cmd, agents_cmd, zed_cmd, auth, idle_stop):
 	_add_command(cast(click.Group, cli), command)
 
 

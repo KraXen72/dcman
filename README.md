@@ -7,6 +7,7 @@ It does a few things together:
 2. Bootstraps SSH access (injects your host public key + starts Dropbear).
 3. Opens an interactive shell (or Zed over SSH) and auto-arms idle shutdown when you exit.
 4. Optionally injects provider tokens from `secret-tool` into container env.
+5. Optionally syncs one global `AGENTS.md` file into agent-specific config paths inside the container.
 
 `dcman` is Linux-focused today. HTTP/.localhost port-forward proxying is not implemented yet.
 
@@ -99,6 +100,31 @@ Pass `--lockfile` to `start`, `shell`, `rebuild`, or `zed` if you want the Dev C
 Run `dcman --help` for all commands and options.
 
 State is tracked under `~/.cache/dcman`.
+
+## global agent instructions
+
+Create a host-side file at:
+
+```bash
+mkdir -p ~/.config/dcman
+$EDITOR ~/.config/dcman/AGENTS.md
+```
+
+On every `dcman start`, `dcman shell`, `dcman rebuild`, or `dcman zed`, dcman copies that file into the managed container as:
+
+- `/home/vscode/.codex/AGENTS.md` for Codex CLI
+- `/home/vscode/.copilot/copilot-instructions.md` for GitHub Copilot CLI
+- `/home/vscode/.config/zed/AGENTS.md` for Zed's native agent
+
+If `XDG_CONFIG_HOME` is set, dcman uses `$XDG_CONFIG_HOME/dcman/AGENTS.md` instead. Set `DCMAN_AGENTS_MD=/path/to/AGENTS.md` to use a different host file. dcman copies the file instead of symlinking it, and it does not write anything into project roots. Project-local files such as `AGENTS.md`, nested `AGENTS.md`, and `.github/copilot-instructions.md` are still loaded by the respective tools as project-specific guidance.
+
+For agent sessions started directly on the host, create symlinks into each tool's host config:
+
+```bash
+dcman agents link-host
+```
+
+This creates the source file if needed and refuses to replace existing target files.
 
 ## local development
 
