@@ -133,7 +133,6 @@ def _clear_known_host_for_workspace(workspace: Path) -> None:
 		zed.clear_known_host(host_port)
 
 
-
 def _prepare_workspace(raw_workspace: str | None) -> Path:
 	ws = workspace_path(raw_workspace)
 	ensure_state_dirs(ws)
@@ -424,7 +423,9 @@ def shell(preset: str | None, workspace: str | None, idle_seconds: int, lockfile
 def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, force: bool, debug: bool) -> None:
 	ws = _prepare_workspace(workspace)
 	if active_session_count(ws) > 0 and not force:
-		click.echo("Error: cannot rebuild while another managed shell session is still active. Pass --force to rebuild anyway.", err=True)
+		click.echo(
+			"Error: cannot rebuild while another managed shell session is still active. Pass --force to rebuild anyway.", err=True
+		)
 		return
 	_container_up(ws, force_rebuild=True, no_cache=no_cache, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
@@ -472,11 +473,11 @@ def list_cmd() -> None:
 @click.command(name="prune")
 @click.argument("target", default=".")
 @click.option("-y", "--yes", is_flag=True, help="skip confirmation prompt")
-def prune_cmd(target: str, yes: bool) -> None: 
+def prune_cmd(target: str, yes: bool) -> None:
 	"""
-	delete initialized devcontainer(s) for a workspace and clear dcman tracking.  
-	
-	TARGET can be a <path to workspace>, '.' (cwd), 'select' (interactive), or 'all'.  
+	delete initialized devcontainer(s) for a workspace and clear dcman tracking.
+
+	TARGET can be a <path to workspace>, '.' (cwd), 'select' (interactive), or 'all'.
 	"""
 	if target == "all":
 		click.echo("current containers: ")
@@ -486,7 +487,7 @@ def prune_cmd(target: str, yes: bool) -> None:
 		if not yes and not click.confirm(f"Delete {len(containers)} container(s)?", default=True):
 			click.echo("Nothing changed.")
 			return
-		
+
 		for path in [Path(cont["workspace"]) for cont in containers]:
 			for cont in find_initialized_devcontainers(path):
 				remove_container(cont["id"])
@@ -502,7 +503,7 @@ def prune_cmd(target: str, yes: bool) -> None:
 		click.echo(render_devcontainer_table(entries))
 		choice = click.prompt("Select container number", type=click.IntRange(1, len(entries)))
 		target_ws = Path(entries[choice - 1]["workspace"])
-	else: 
+	else:
 		target_path = str(Path.cwd() if target == "." else target)
 		target_ws = workspace_path(target_path)
 
