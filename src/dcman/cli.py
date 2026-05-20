@@ -217,6 +217,7 @@ def _container_up(
 		save_devcontainer_hash(ws)
 		env = _devcontainer_env(ws)
 		if debug:
+			click.echo("Resolving devcontainer feature versions...")
 			feature_report = format_feature_versions(resolve_feature_versions(ws))
 			if feature_report:
 				click.echo(feature_report)
@@ -418,11 +419,13 @@ def shell(preset: str | None, workspace: str | None, idle_seconds: int, lockfile
 @click.argument("workspace", required=False)
 @click.option("--no-cache", "no_cache", is_flag=True, help="bypass BuildKit layer cache (full reinstall of all features)")
 @click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
+@click.option("-f", "--force", is_flag=True, help="force rebuild even if another managed shell session is still active")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
-def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, debug: bool) -> None:
+def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, force: bool, debug: bool) -> None:
 	ws = _prepare_workspace(workspace)
-	if active_session_count(ws) > 0:
-		click.echo("Warning: rebuilding while another managed shell session is still active.", err=True)
+	if active_session_count(ws) > 0 and not force:
+		click.echo("Error: cannot rebuild while another managed shell session is still active. Pass --force to rebuild anyway.", err=True)
+		return
 	_container_up(ws, force_rebuild=True, no_cache=no_cache, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if container_id:
