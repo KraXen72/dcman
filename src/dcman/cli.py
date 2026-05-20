@@ -197,6 +197,10 @@ def _devcontainer_env(ws: Path) -> dict[str, str]:
 	return env
 
 
+def _initialized_container_ids(ws: Path) -> set[str]:
+	return {entry["id"] for entry in find_initialized_devcontainers(ws)}
+
+
 def _container_up(
 	ws: Path,
 	*,
@@ -255,6 +259,7 @@ def _container_up(
 		feature_report = format_feature_versions(resolve_feature_versions(ws))
 		if feature_report:
 			click.echo(feature_report)
+	previous_container_ids = _initialized_container_ids(ws)
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
@@ -262,7 +267,8 @@ def _container_up(
 		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed:
 		save_devcontainer_hash(ws)
-	return env, do_rebuild
+	container_was_recreated = container_id is not None and container_id not in previous_container_ids
+	return env, do_rebuild or container_was_recreated
 
 
 def _shell_env(env: dict[str, str]) -> dict[str, str]:
@@ -320,14 +326,15 @@ def _run_managed_shell(
 	ws = _prepare_workspace(workspace)
 	preset_cmd = _resolve_preset(preset)
 
-	env, did_rebuild = _container_up(ws, no_rebuild=no_rebuild, lockfile=lockfile, debug=debug)
+	env, should_clear_known_host = _container_up(ws, no_rebuild=no_rebuild, lockfile=lockfile, debug=debug)
 	container_id = wait_for_container(ws)
 	if not container_id:
 		raise click.ClickException(f"no matching devcontainer found for {ws}")
 
 	host_port = int(env["DCMAN_SSH_PORT"])
-	# Clear known_hosts only after rebuilds, when container host keys may rotate.
-	warning = zed.bootstrap_ssh(container_id, host_port, clear_known_host=did_rebuild)
+	# Clear known_hosts only when this invocation may have put a new
+	# container-side SSH host key behind dcman's stable forwarded port.
+	warning = zed.bootstrap_ssh(container_id, host_port, do_clear_known_host=should_clear_known_host)
 	if warning:
 		click.echo(f"Warning: {warning}", err=True)
 
@@ -431,7 +438,7 @@ def rebuild(workspace: str | None, no_cache: bool, lockfile: bool, force: bool, 
 	container_id = wait_for_container(ws)
 	if container_id:
 		# Rebuild path always clears known-host entry to avoid key-mismatch warnings.
-		warning = zed.bootstrap_ssh(container_id, alloc_ssh_port(ws), clear_known_host=True)
+		warning = zed.bootstrap_ssh(container_id, alloc_ssh_port(ws), do_clear_known_host=True)
 		if warning:
 			click.echo(f"Warning: {warning}", err=True)
 
@@ -571,7 +578,23 @@ def agents_link_host_cmd() -> None:
 		click.echo(message)
 
 
+@click.command(name="unlink-host", help="un-symlink host agent instruction files to dcman's global AGENTS.md")
+@click.option("-y", "--yes", is_flag=True, help="auto-accept the confirmation prompt")
+def agents_unlink_host_cmd(yes: bool) -> None:
+	if not yes and not click.confirm("Unlink all host agent paths?", default=True):
+		click.echo("Nothing changed.")
+		return
+
+	try:
+		messages = agent_instructions.unlink_host_links()
+	except CmdError as exc:
+		raise click.ClickException(str(exc)) from None
+	for message in messages:
+		click.echo(message)
+
+
 cast(Any, agents_cmd).add_command(agents_link_host_cmd)
+cast(Any, agents_cmd).add_command(agents_unlink_host_cmd)
 
 
 @click.command(name="zed", help="start the devcontainer, open it in Zed via SSH, and keep a shell")

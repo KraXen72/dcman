@@ -50,8 +50,8 @@ def clear_known_host(host_port: int) -> None:
 	)
 
 
-def bootstrap_ssh(container_id: str, host_port: int, *, clear_known_host: bool) -> str | None:
-	if clear_known_host:
+def bootstrap_ssh(container_id: str, host_port: int, *, do_clear_known_host: bool) -> str | None:
+	if do_clear_known_host:
 		# Rebuilds rotate host keys; remove stale known_hosts entry to avoid
 		# scary MITM prompts when reconnecting to 127.0.0.1:<port>.
 		clear_known_host(host_port)

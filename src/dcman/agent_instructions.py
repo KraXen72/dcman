@@ -84,6 +84,15 @@ def configure_host_links() -> list[str]:
 	return [_link_host_path(source, path) for path in paths]
 
 
+def unlink_host_links() -> list[str]:
+	source = source_path().resolve(strict=False)
+	paths = _host_tool_paths()
+	links = [p for p in paths if p.is_symlink() and p.resolve(strict=False) == source]
+	for link in links:
+		link.unlink()
+	return [str(link) for link in links]
+
+
 def sync_to_container(container_id: str, *, user: str = REMOTE_USER) -> str | None:
 	source = source_path()
 	if not source.is_file():
