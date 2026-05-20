@@ -469,18 +469,31 @@ def list_cmd() -> None:
 	click.echo(render_devcontainer_table(entries))
 
 
-@click.command(name="prune", help="delete initialized devcontainer(s) for a workspace and clear dcman tracking")
-@click.option("-w", "--workspace", default=None, help="workspace folder to prune")
-@click.option("--select", "select_mode", is_flag=True, help="interactively choose from initialized devcontainers")
+@click.command(name="prune")
+@click.argument("target", default=".")
 @click.option("-y", "--yes", is_flag=True, help="skip confirmation prompt")
-def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
-	if workspace and select_mode:
-		raise click.ClickException("use either --workspace or --select, not both")
-	if not workspace and not select_mode:
-		raise click.ClickException("pass --workspace or --select")
+def prune_cmd(target: str, yes: bool) -> None: 
+	"""
+	delete initialized devcontainer(s) for a workspace and clear dcman tracking.  
+	
+	TARGET can be a <path to workspace>, '.' (cwd), 'select' (interactive), or 'all'.  
+	"""
+	if target == "all":
+		click.echo("current containers: ")
+		containers = list_initialized_devcontainers()
+		click.echo(render_devcontainer_table(containers))
+
+		if not yes and not click.confirm(f"Delete {len(containers)} container(s)?", default=True):
+			click.echo("Nothing changed.")
+			return
+		
+		for path in [Path(cont["workspace"]) for cont in containers]:
+			for cont in find_initialized_devcontainers(path):
+				remove_container(cont["id"])
+		return
 
 	target_ws: Path
-	if select_mode:
+	if target == "select":
 		# Interactive mode helps when many workspaces are present.
 		entries = list_initialized_devcontainers()
 		if not entries:
@@ -489,8 +502,9 @@ def prune_cmd(workspace: str | None, select_mode: bool, yes: bool) -> None:
 		click.echo(render_devcontainer_table(entries))
 		choice = click.prompt("Select container number", type=click.IntRange(1, len(entries)))
 		target_ws = Path(entries[choice - 1]["workspace"])
-	else:
-		target_ws = workspace_path(workspace)
+	else: 
+		target_path = str(Path.cwd() if target == "." else target)
+		target_ws = workspace_path(target_path)
 
 	matches = find_initialized_devcontainers(target_ws)
 	if not matches:
