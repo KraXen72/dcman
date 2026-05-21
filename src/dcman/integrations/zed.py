@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from textwrap import dedent
 
 from ..config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT
 from ..container import container_exec, container_exec_input, container_exec_ok
@@ -58,7 +59,13 @@ def bootstrap_ssh(container_id: str, host_port: int, *, do_clear_known_host: boo
 
 	if not HOST_SSH_PUBKEY.exists():
 		# Not fatal: user can still open a shell directly through the engine.
-		return f"{HOST_SSH_PUBKEY} not found; skipping SSH bootstrap."
+		message = dedent(f"""\
+			{HOST_SSH_PUBKEY} not found; skipping SSH bootstrap.
+
+			Hint: use `ssh-keygen -t ed25519 -C "devcontainer"` to generate an ssh key for dcman.
+			You _probably_ don't need a passphrase, this will only be used for the local container.
+		""")
+		return message
 
 	_ensure_zed_user_dirs(container_id)
 
