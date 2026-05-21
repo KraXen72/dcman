@@ -70,7 +70,7 @@ def test_start_list_kill_prune(tmp_path: Path) -> None:
 	assert "Stopped devcontainer" in kill_result.stdout or "No running devcontainer" in kill_result.stdout
 
 	prune_result = subprocess.run(
-		[sys.executable, "-m", "dcman", "prune", "--workspace", str(workspace), "-y"],
+		[sys.executable, "-m", "dcman", "prune", str(workspace), "-y"],
 		cwd=str(workspace),
 		env=env,
 		capture_output=True,

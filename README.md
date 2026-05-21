@@ -85,7 +85,7 @@ dcman zed
 # rebuild, list, prune, stop
 dcman rebuild
 dcman list
-dcman prune --workspace /absolute/path/to/workspace
+dcman prune /absolute/path/to/workspace
 dcman kill
 ```
 
