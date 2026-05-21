@@ -548,56 +548,21 @@ def devcontainer_up(
 	lockfile_path = _devcontainer_lockfile_path(workspace)
 	lockfile_existed_before = lockfile_path.is_file() if lockfile_path else False
 
-	engine = container_engine()
 	args = [
 		"up",
 		*flags,
 		"--docker-path",
-		engine,
+		container_engine(),
 		"--update-remote-user-uid-default",
 		"never" if _use_template_uid_fast_path(workspace) else "on",
 		"--workspace-folder",
 		str(workspace),
 	]
-	try:
-		result = devcontainer_cli.run(args, env=env, recover_podman_started_hang=engine == "podman")
-	except devcontainer_cli.ContainerStartedCliHang:
-		# Dev Containers CLI has already created and started the Podman
-		# container, but got stuck waiting for its start event. Resume the
-		# official lifecycle from the next supported CLI command instead of
-		# duplicating devcontainer.json command semantics in dcman.
-		container_id = wait_for_container(workspace)
-		if not container_id:
-			raise CmdError(f"devcontainer started but no matching container was found for {workspace}")
-		_run_devcontainer_user_commands(workspace, container_id, engine=engine, env=env)
-		result = subprocess.CompletedProcess(args, 0)
+	result = devcontainer_cli.run(args, env=env)
 	if not lockfile:
 		_delete_created_lockfile(lockfile_path, existed_before=lockfile_existed_before)
 	if result.returncode != 0:
 		raise CmdError(f"devcontainer up failed ({result.returncode})")
-
-
-def _run_devcontainer_user_commands(
-	workspace: Path,
-	container_id: str,
-	*,
-	engine: str,
-	env: dict[str, str],
-) -> None:
-	result = devcontainer_cli.run(
-		[
-			"run-user-commands",
-			"--docker-path",
-			engine,
-			"--workspace-folder",
-			str(workspace),
-			"--container-id",
-			container_id,
-		],
-		env=env,
-	)
-	if result.returncode != 0:
-		raise CmdError(f"devcontainer run-user-commands failed ({result.returncode})")
 
 
 def container_exec(
