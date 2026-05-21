@@ -13,6 +13,13 @@ dependencies = [
   "rich>=13.9.4,<14",
 ]
 
+[dependency-groups]
+test = [
+  "pytest>=7.4",
+  "pytest-mock>=3.12",
+  "pexpect>=4.9",
+]
+
 [project.scripts]
 dcman = "dcman.cli:main"
 
@@ -21,3 +28,4 @@ packages = ["src/dcman"]
 
 [tool.uv]
 package = true
+default-groups = ["test"]

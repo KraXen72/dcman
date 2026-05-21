@@ -85,7 +85,7 @@ dcman zed
 # rebuild, list, prune, stop
 dcman rebuild
 dcman list
-dcman prune --workspace /absolute/path/to/workspace
+dcman prune /absolute/path/to/workspace
 dcman kill
 ```
 
@@ -148,6 +148,23 @@ If you changed dependencies/entrypoints in `pyproject.toml`, run `uv sync` and r
 
 ```bash
 uv tool install --editable --reinstall .
+```
+
+## testing
+
+Inside the Fedora sandbox devcontainer:
+
+```bash
+cd dcman
+uv sync
+uv run pytest
+```
+
+On a host with a real container engine (opt-in):
+
+```bash
+cd dcman
+uv run pytest --run-engine-e2e
 ```
 
 ## notes

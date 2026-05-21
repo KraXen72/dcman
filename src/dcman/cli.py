@@ -466,8 +466,8 @@ def kill_cmd(workspace: str | None) -> None:
 @click.command(name="list", help="list initialized devcontainers across workspaces")
 def list_cmd() -> None:
 	# Keep prune affordances visible because list+prune are commonly paired.
-	click.echo("Prune from anywhere: dcman prune --workspace /absolute/path/to/workspace")
-	click.echo("Interactive prune:  dcman prune --select")
+	click.echo("Prune from anywhere: dcman prune /absolute/path/to/workspace")
+	click.echo("Interactive prune:  dcman prune select")
 
 	entries = list_initialized_devcontainers()
 	if not entries:

@@ -19,7 +19,7 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
 	# `text=True` gives decoded strings instead of raw bytes in stdout/stderr.
 	kwargs: dict[str, Any] = {"text": True, "env": env}
-	if input is not None:
+	if input_data is not None:
 		kwargs["input"] = input_data
 	if capture:
 		# Capture is opt-in so normal commands still stream directly to terminal.
