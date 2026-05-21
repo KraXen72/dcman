@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from dcman import cli, container, state
 from tests.helpers import make_workspace, write_text
@@ -25,27 +25,44 @@ def _stub_container_up(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, ob
 	monkeypatch.setattr(cli, "devcontainer_up", fake_devcontainer_up)
 
 
+def _stub_container_up_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: set())
+	monkeypatch.setattr(cli, "wait_for_container", lambda ws: "container123")
+	monkeypatch.setattr(cli, "_devcontainer_env", lambda ws: {"DCMAN_SSH_PORT": "2222"})
+	monkeypatch.setattr(cli, "_sync_agent_instructions_if_configured", lambda *args, **kwargs: None)
+	monkeypatch.setattr(cli, "_copy_codex_cli_auth_if_needed", lambda *args, **kwargs: None)
+
+
+def _invoke_container_up(workspace: Path, *, input_text: str) -> tuple[Result, dict[str, object]]:
+	result_state: dict[str, object] = {}
+
+	@click.command()
+	def run() -> None:
+		env, rebuilt = cli._container_up(workspace, no_rebuild=False)
+		result_state["env"] = env
+		result_state["rebuilt"] = rebuilt
+
+	result = CliRunner().invoke(run, input=input_text)
+	return result, result_state
+
+
 @pytest.mark.cli
 def test_container_up_prompt_yes_rebuilds_and_saves_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	workspace = make_workspace(tmp_path / "ws", {".devcontainer.json": json.dumps({"name": "root"}) + "\n"})
 	calls: list[dict[str, object]] = []
 
 	_stub_container_up(monkeypatch, calls)
-	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: set())
-	monkeypatch.setattr(cli, "wait_for_container", lambda ws: "container123")
-	monkeypatch.setattr(cli, "_devcontainer_env", lambda ws: {"DCMAN_SSH_PORT": "2222"})
-	monkeypatch.setattr(cli, "_sync_agent_instructions_if_configured", lambda *args, **kwargs: None)
-	monkeypatch.setattr(cli, "_copy_codex_cli_auth_if_needed", lambda *args, **kwargs: None)
-	monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: "y")
+	_stub_container_up_dependencies(monkeypatch)
 
-	env, rebuilt = cli._container_up(workspace, no_rebuild=False)
-	assert rebuilt is True
+	result, state_data = _invoke_container_up(workspace, input_text="y\n")
+	assert result.exit_code == 0
+	assert state_data["rebuilt"] is True
 	assert calls[0]["rebuild"] is True
 
 	snapshot = container.stored_devcontainer_config_snapshot(workspace)
 	assert snapshot is not None
 	assert snapshot[".devcontainer.json"].strip() == '{"name": "root"}'
-	assert env["DCMAN_SSH_PORT"] == "2222"
+	assert state_data["env"]["DCMAN_SSH_PORT"] == "2222"
 
 
 @pytest.mark.cli
@@ -54,34 +71,29 @@ def test_container_up_prompt_no_skips_snapshot(tmp_path: Path, monkeypatch: pyte
 	calls: list[dict[str, object]] = []
 
 	_stub_container_up(monkeypatch, calls)
-	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: set())
-	monkeypatch.setattr(cli, "wait_for_container", lambda ws: "container123")
-	monkeypatch.setattr(cli, "_devcontainer_env", lambda ws: {"DCMAN_SSH_PORT": "2222"})
-	monkeypatch.setattr(cli, "_sync_agent_instructions_if_configured", lambda *args, **kwargs: None)
-	monkeypatch.setattr(cli, "_copy_codex_cli_auth_if_needed", lambda *args, **kwargs: None)
-	monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: "n")
+	_stub_container_up_dependencies(monkeypatch)
 
-	env, rebuilt = cli._container_up(workspace, no_rebuild=False)
-	assert rebuilt is True
+	result, state_data = _invoke_container_up(workspace, input_text="n\n")
+	assert result.exit_code == 0
+	assert state_data["rebuilt"] is True
 	assert calls[0]["rebuild"] is False
 	assert container.stored_devcontainer_config_snapshot(workspace) is None
 	assert state.load_state(workspace).get("devcontainer_hash") is None
-	assert env["DCMAN_SSH_PORT"] == "2222"
+	assert state_data["env"]["DCMAN_SSH_PORT"] == "2222"
 
 
 @pytest.mark.cli
 def test_container_up_prompt_abort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	workspace = make_workspace(tmp_path / "ws", {".devcontainer.json": json.dumps({"name": "root"}) + "\n"})
+	calls: list[dict[str, object]] = []
 
-	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: set())
-	monkeypatch.setattr(cli, "wait_for_container", lambda ws: "container123")
-	monkeypatch.setattr(cli, "_devcontainer_env", lambda ws: {"DCMAN_SSH_PORT": "2222"})
-	monkeypatch.setattr(cli, "_sync_agent_instructions_if_configured", lambda *args, **kwargs: None)
-	monkeypatch.setattr(cli, "_copy_codex_cli_auth_if_needed", lambda *args, **kwargs: None)
-	monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: "a")
+	_stub_container_up(monkeypatch, calls)
+	_stub_container_up_dependencies(monkeypatch)
 
-	with pytest.raises(click.Abort):
-		cli._container_up(workspace, no_rebuild=False)
+	result, _state_data = _invoke_container_up(workspace, input_text="a\n")
+	assert result.exit_code == 1
+	assert isinstance(result.exception, SystemExit)
+	assert calls == []
 
 
 @pytest.mark.cli
