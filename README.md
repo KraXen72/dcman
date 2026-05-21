@@ -150,5 +150,22 @@ If you changed dependencies/entrypoints in `pyproject.toml`, run `uv sync` and r
 uv tool install --editable --reinstall .
 ```
 
+## testing
+
+Inside the Fedora sandbox devcontainer:
+
+```bash
+cd dcman
+uv sync
+uv run pytest
+```
+
+On a host with a real container engine (opt-in):
+
+```bash
+cd dcman
+uv run pytest --run-engine-e2e
+```
+
 ## notes
 I made `dcman` primarily for myself. If you find it useful, great! However, please note that I reserve the right to not implement some features I won't use, to prevent `dcman`'s scope from balooning. Thank you for understanding.

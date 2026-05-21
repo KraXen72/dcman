@@ -1,7 +1,7 @@
 {
 	"name":"Fedora Sandbox",
 	"image":"ghcr.io/kraxen72/fedora-toolchain-base:latest",
-	"postCreateCommand":"pnpm add -g typescript npm-check-updates degit repomix",
+	"postCreateCommand":"pnpm add -g typescript npm-check-updates degit repomix @devcontainers/cli",
 	"workspaceMount":"source=${localWorkspaceFolder},target=/home/vscode/workspaces/${localWorkspaceFolderBasename},type=bind,Z",
 	"workspaceFolder":"/home/vscode/workspaces/${localWorkspaceFolderBasename}",
 	"features": {
