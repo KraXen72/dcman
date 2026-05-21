@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import click
 import pytest
-from click.testing import CliRunner, Result
 
 from dcman import cli, container, state
-from tests.helpers import make_workspace, write_text
+from tests.helpers import invoke_in_click_context, make_workspace, write_text
 
 
 def _stub_container_up(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, object]]) -> None:
@@ -33,16 +31,20 @@ def _stub_container_up_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 	monkeypatch.setattr(cli, "_copy_codex_cli_auth_if_needed", lambda *args, **kwargs: None)
 
 
-def _invoke_container_up(workspace: Path, *, input_text: str) -> tuple[Result, dict[str, object]]:
+def _invoke_container_up(
+	workspace: Path,
+	*,
+	input_text: str,
+	catch_exceptions: bool = False,
+):
 	result_state: dict[str, object] = {}
 
-	@click.command()
 	def run() -> None:
-		env, rebuilt = cli._container_up(workspace, no_rebuild=False)
+		env, should_clear_known_host = cli._container_up(workspace, no_rebuild=False)
 		result_state["env"] = env
-		result_state["rebuilt"] = rebuilt
+		result_state["should_clear_known_host"] = should_clear_known_host
 
-	result = CliRunner().invoke(run, input=input_text)
+	result = invoke_in_click_context(run, input=input_text, catch_exceptions=catch_exceptions)
 	return result, result_state
 
 
@@ -56,7 +58,8 @@ def test_container_up_prompt_yes_rebuilds_and_saves_snapshot(tmp_path: Path, mon
 
 	result, state_data = _invoke_container_up(workspace, input_text="y\n")
 	assert result.exit_code == 0
-	assert state_data["rebuilt"] is True
+	assert "Rebuild before starting? [Y/n/a]" in result.output
+	assert state_data["should_clear_known_host"] is True
 	assert calls[0]["rebuild"] is True
 
 	snapshot = container.stored_devcontainer_config_snapshot(workspace)
@@ -75,7 +78,8 @@ def test_container_up_prompt_no_skips_snapshot(tmp_path: Path, monkeypatch: pyte
 
 	result, state_data = _invoke_container_up(workspace, input_text="n\n")
 	assert result.exit_code == 0
-	assert state_data["rebuilt"] is True
+	assert "Rebuild before starting? [Y/n/a]" in result.output
+	assert state_data["should_clear_known_host"] is True
 	assert calls[0]["rebuild"] is False
 	assert container.stored_devcontainer_config_snapshot(workspace) is None
 	assert state.load_state(workspace).get("devcontainer_hash") is None
@@ -90,8 +94,9 @@ def test_container_up_prompt_abort(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 	_stub_container_up(monkeypatch, calls)
 	_stub_container_up_dependencies(monkeypatch)
 
-	result, _state_data = _invoke_container_up(workspace, input_text="a\n")
+	result, _state_data = _invoke_container_up(workspace, input_text="a\n", catch_exceptions=True)
 	assert result.exit_code == 1
+	assert "Rebuild before starting? [Y/n/a]" in result.output
 	assert isinstance(result.exception, SystemExit)
 	assert calls == []
 
@@ -104,11 +109,11 @@ def test_rebuild_prompt_shows_diff_with_click_runner(tmp_path: Path, monkeypatch
 	write_text(workspace / ".devcontainer.json", json.dumps({"name": "after"}) + "\n")
 	monkeypatch.setenv("DCMAN_DIFF_RENDERER", "plain")
 
-	@click.command()
 	def prompt_cmd() -> None:
 		cli._confirm_rebuild_for_config_change(workspace)
 
-	result = CliRunner().invoke(prompt_cmd, input="n\n")
+	result = invoke_in_click_context(prompt_cmd, input="n\n")
 	assert result.exit_code == 0
 	assert "--- a/.devcontainer.json" in result.output
 	assert '"after"' in result.output
+	assert "Rebuild before starting? [Y/n/a]" in result.output

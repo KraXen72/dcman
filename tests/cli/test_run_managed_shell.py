@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import click
 import pytest
-from click.testing import CliRunner
 
 from dcman import cli
-from tests.helpers import make_workspace
+from tests.helpers import invoke_in_click_context, make_workspace
 
 
 @pytest.mark.cli
@@ -41,11 +39,10 @@ def test_run_managed_shell_registers_and_schedules(tmp_path: Path, monkeypatch: 
 
 	monkeypatch.setattr(cli, "schedule_idle_stop", record_schedule)
 
-	@click.command()
 	def run() -> None:
 		cli._run_managed_shell(str(workspace), idle_seconds=123, preset=None, no_rebuild=True)
 
-	result = CliRunner().invoke(run)
+	result = invoke_in_click_context(run)
 	assert result.exit_code == 0
 	assert events == ["register", "exec", "unregister", "schedule"]
 	assert scheduled["delay"] == 123
@@ -65,9 +62,8 @@ def test_run_managed_shell_skips_schedule_when_other_sessions_active(tmp_path: P
 
 	monkeypatch.setattr(cli, "schedule_idle_stop", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("schedule should not run")))
 
-	@click.command()
 	def run() -> None:
 		cli._run_managed_shell(str(workspace), idle_seconds=30, preset=None, no_rebuild=True)
 
-	result = CliRunner().invoke(run)
+	result = invoke_in_click_context(run)
 	assert result.exit_code == 0

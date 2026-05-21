@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import click
 from pathlib import Path
+
 import pytest
-from click.testing import CliRunner
 
 from dcman import cli, config
-from tests.helpers import make_workspace
+from tests.helpers import invoke_in_click_context, make_workspace
 
 
 @pytest.mark.cli
@@ -46,11 +45,10 @@ def test_shell_env_forwards_terminal_and_auth_vars(tmp_path: Path, monkeypatch: 
 
 	monkeypatch.setattr(cli, "container_exec_interactive", record_exec)
 
-	@click.command()
 	def run() -> None:
 		cli._run_managed_shell(str(workspace), idle_seconds=1, preset=None, no_rebuild=True)
 
-	result = CliRunner().invoke(run)
+	result = invoke_in_click_context(run)
 	assert result.exit_code == 0
 
 	container_env = captured["env"]

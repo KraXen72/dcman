@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 from pathlib import Path
+
+import click
+from click.testing import CliRunner, Result
 
 
 def write_text(path: Path, content: str) -> None:
@@ -27,3 +31,16 @@ def make_workspace(root: Path, files: dict[str, str]) -> Path:
 
 def load_json(path: Path) -> dict:
 	return json.loads(path.read_text())
+
+
+def invoke_in_click_context(
+	callback: Callable[[], None],
+	*,
+	input: str | None = None,
+	catch_exceptions: bool = False,
+) -> Result:
+	@click.command()
+	def run() -> None:
+		callback()
+
+	return CliRunner().invoke(run, input=input, catch_exceptions=catch_exceptions)
