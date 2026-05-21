@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import CmdError
+from .process import run as run_process
 
 # All direct calls to the external Dev Container CLI live here.  The CLI is the
 # source of truth for config parsing/merging and registry metadata; dcman should
@@ -25,11 +26,10 @@ def require() -> None:
 def supports_up_no_lockfile() -> bool:
 	# Support depends on the installed CLI version.
 	require()
-	result = subprocess.run(
+	result = run_process(
 		[_BINARY, "up", "--help"],
-		stdout=subprocess.PIPE,
-		stderr=subprocess.PIPE,
-		text=True,
+		capture=True,
+		check=False,
 	)
 	return "--no-lockfile" in result.stdout or "--no-lockfile" in result.stderr
 
@@ -42,9 +42,7 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
 	require()
 	cmd = [_BINARY, *args]
-	if capture:
-		return subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-	return subprocess.run(cmd, env=env, text=True)
+	return run_process(cmd, env=env, capture=capture, check=False)
 
 
 def _command_detail(result: subprocess.CompletedProcess[str]) -> str:

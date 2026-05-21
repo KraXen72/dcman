@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 
 from .config import AUTH_PROVIDERS
 from .errors import CmdError, SecretToolUnavailable
@@ -20,8 +19,8 @@ def require_secret_tool() -> None:
 
 def _secret_attrs(provider: str) -> list[str]:
 	# secret-tool identifies secrets by a flat list of attribute key-value pairs:
-	# ["key1", "val1", "key2", "val2", ...]. We use two attributes — "app" and
-	# "provider" — so entries are scoped to dcman and won't collide with other apps.
+	# ["key1", "val1", "key2", "val2", ...]. We use two attributes: "app" and
+	# "provider", so entries are scoped to dcman and won't collide with other apps.
 	return ["app", "dcman-devcontainer", "provider", provider]
 
 
@@ -38,11 +37,11 @@ def get_provider_token(provider: str) -> str | None:
 def store_provider_token(provider: str, token: str) -> None:
 	require_secret_tool()
 	label = f"dcman token: {provider}"
-	proc = subprocess.run(
+	proc = run(
 		["secret-tool", "store", f"--label={label}", *_secret_attrs(provider)],
 		# secret-tool reads the secret value from stdin (newline-terminated).
-		input=token + "\n",
-		text=True,
+		input_data=token + "\n",
+		check=False,
 	)
 	if proc.returncode != 0:
 		raise CmdError(f"failed to store {provider} token in secret-tool")

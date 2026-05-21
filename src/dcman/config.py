@@ -19,7 +19,9 @@ LEGACY_STATE_ROOT = Path.home() / ".cache" / "devcontainer-lifecycle"
 
 # One-time host migration command:
 # [ -d ~/.cache/devcontainer-lifecycle ] && mkdir -p ~/.cache/dcman && cp -a ~/.cache/devcontainer-lifecycle/. ~/.cache/dcman/ && rm -rf ~/.cache/devcontainer-lifecycle
+
 DEFAULT_IDLE_SECONDS = 300
+
 # Must match the container-side SSH port exposed in devcontainer runArgs.
 SSH_CONTAINER_PORT = 2222
 HOST_SSH_PUBKEY = Path.home() / ".ssh" / "id_ed25519.pub"

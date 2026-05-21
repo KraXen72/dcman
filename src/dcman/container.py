@@ -21,6 +21,7 @@ from python_on_whales.exceptions import DockerException
 from . import devcontainer_cli
 from .config import DEFAULT_DEVCONTAINER_TEMPLATE, DEFAULT_WORKSPACE_FOLDER, DEVCONTAINER_TEMPLATES, UidFastPath
 from .errors import CmdError
+from .process import run
 from .rendering import render_diff, render_table
 from .state import load_state, save_state
 
@@ -140,7 +141,7 @@ def _list_containers(*, all_containers: bool) -> list[Container]:
 	try:
 		return _client().container.list(all=all_containers)
 	except DockerException as exc:
-		raise _docker_cmd_error("failed to list containers", exc)
+		raise _docker_cmd_error("failed to list containers", exc) from exc
 
 
 def list_initialized_devcontainers() -> list[dict[str, str]]:
@@ -190,7 +191,7 @@ def find_container(workspace: Path) -> str | None:
 	try:
 		matches = _client().container.list(filters={"label": label})
 	except DockerException as exc:
-		raise _docker_cmd_error("failed to list containers for workspace lookup", exc)
+		raise _docker_cmd_error("failed to list containers for workspace lookup", exc) from exc
 	if matches:
 		return matches[0].id
 
@@ -419,7 +420,7 @@ def _format_diff_with_delta(diff: str) -> str | None:
 	# prompt must work on a minimal system too, so this is a soft dependency.
 	if not diff or shutil.which("delta") is None:
 		return None
-	result = subprocess.run(
+	result = run(
 		[
 			"delta",
 			"--paging=never",
@@ -430,11 +431,9 @@ def _format_diff_with_delta(diff: str) -> str | None:
 			"--hunk-header-decoration-style",
 			"blue ul",
 		],
-		input=diff,
-		stdout=subprocess.PIPE,
-		stderr=subprocess.DEVNULL,
-		text=True,
+		input_data=diff,
 		check=False,
+		capture=True,
 	)
 	if result.returncode != 0:
 		return None
@@ -477,7 +476,7 @@ def save_devcontainer_hash(workspace: Path) -> None:
 	}
 	save_state(workspace, state)
 
-
+# this is mostly for debugging to see, if the new versions of features were resolved when re-building
 def devcontainer_feature_metadata(ref: str) -> tuple[str | None, str | None, str | None]:
 	# Let the official Dev Container CLI resolve floating tags and registry
 	# metadata, so dcman does not need to understand every registry detail.
@@ -579,7 +578,7 @@ def container_exec(
 	try:
 		return cast(str, _client().container.execute(container_id, command, user=user, workdir=workdir, envs=env or {}))
 	except DockerException as exc:
-		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
+		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc) from exc
 
 
 def container_exec_input(
@@ -597,7 +596,7 @@ def container_exec_input(
 	if workdir:
 		cmd += ["-w", workdir]
 	cmd += [container_id, *command]
-	result = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	result = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: UP022
 	if result.returncode != 0:
 		details = "\n".join(
 			part for part in (_format_process_output(result.stderr), _format_process_output(result.stdout)) if part
@@ -618,7 +617,7 @@ def container_exec_ok(container_id: str, command: list[str], *, user: str | None
 	except DockerException as exc:
 		if exc.return_code == 1:
 			return False
-		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc)
+		raise _docker_cmd_error(f"failed to execute command in container {container_id[:12]}", exc) from exc
 	return True
 
 
@@ -682,7 +681,7 @@ def container_exec_interactive(
 		# forwarded, so only the intended vars reach the container.
 		cmd += ["-e", f"{key}={value}"]
 	cmd += [container_id, *command]
-	return subprocess.run(cmd).returncode
+	return run(cmd, check=False).returncode
 
 
 def stop_container(container_id: str) -> int:

@@ -5,6 +5,7 @@ from textwrap import dedent
 
 from ..config import HOST_SSH_PUBKEY, REMOTE_USER, SSH_CONTAINER_PORT
 from ..container import container_exec, container_exec_input, container_exec_ok
+from ..process import run
 
 USER_HOME = f"/home/{REMOTE_USER}"
 SSH_DIR = f"{USER_HOME}/.ssh"
@@ -44,10 +45,10 @@ def _ensure_zed_user_dirs(container_id: str) -> None:
 def clear_known_host(host_port: int) -> None:
 	# Remove stale known_hosts entry to avoid scary MITM prompts when
 	# reconnecting to 127.0.0.1:<port>.
-	subprocess.run(
+	run(
 		["ssh-keygen", "-R", f"[127.0.0.1]:{host_port}"],
-		stdout=subprocess.DEVNULL,
-		stderr=subprocess.DEVNULL,
+		capture=True,
+		check=False,
 	)
 
 
@@ -85,8 +86,7 @@ def bootstrap_ssh(container_id: str, host_port: int, *, do_clear_known_host: boo
 	container_exec(container_id, ["chmod", "600", AUTHORIZED_KEYS], user=REMOTE_USER)
 
 	if not container_exec_ok(container_id, ["pgrep", "-x", "dropbear"], user="root"):
-		# Dropbear flags: -E log to stderr, -s disable password auth,
-		# -g disable root login, -R auto-generate host keys if missing.
+		# Dropbear flags: -E log to stderr, -s disable password auth, -g disable root login, -R auto-generate host keys if missing.
 		container_exec(container_id, ["dropbear", "-p", str(SSH_CONTAINER_PORT), "-E", "-s", "-g", "-R"], user="root")
 	return None
 

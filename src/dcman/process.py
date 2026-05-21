@@ -10,10 +10,17 @@ from .errors import CmdError
 
 
 def run(
-	cmd: list[str], *, capture: bool = False, check: bool = True, env: dict[str, str] | None = None
+	cmd: list[str],
+	*,
+	capture: bool = False,
+	check: bool = True,
+	env: dict[str, str] | None = None,
+	input_data: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
 	# `text=True` gives decoded strings instead of raw bytes in stdout/stderr.
 	kwargs: dict[str, Any] = {"text": True, "env": env}
+	if input is not None:
+		kwargs["input"] = input_data
 	if capture:
 		# Capture is opt-in so normal commands still stream directly to terminal.
 		kwargs["stdout"] = subprocess.PIPE

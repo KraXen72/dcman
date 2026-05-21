@@ -71,7 +71,7 @@ from .state import (
 
 T = TypeVar("T")
 
-# allowlist of vars to preserve, not a set of "enable color" flags.
+# allowlist of vars to preserve (not a set of "enable color" flags)
 TERMINAL_ENV_KEYS = (
 	"COLORTERM",
 	"TERM_PROGRAM",
@@ -92,14 +92,14 @@ def require_binaries() -> None:
 		require_devcontainer_cli()
 		container_engine()
 	except CmdError as exc:
-		raise click.ClickException(str(exc))
+		raise click.ClickException(str(exc)) from exc
 
 
 def _format_aliases(aliases: Mapping[str, object]) -> str:
 	return ", ".join(aliases) or "(none)"
 
 
-def _resolve_alias(kind: str, alias: str, aliases: Mapping[str, T]) -> T:
+def _resolve_alias(kind: str, alias: str, aliases: Mapping[str, T]) -> T:  # noqa: UP047
 	try:
 		return aliases[alias]
 	except KeyError:
@@ -418,10 +418,11 @@ def start(
 @click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
 @click.option("-d", "--debug", is_flag=True, help="show diagnostic devcontainer feature resolution")
 def shell(preset: str | None, workspace: str | None, idle_seconds: int, lockfile: bool, debug: bool) -> None:
+	# shell is the same as start, except it never rebuilds.
 	_run_managed_shell(workspace, idle_seconds, preset, no_rebuild=True, lockfile=lockfile, debug=debug)
 
 
-@click.command(help="rebuild the devcontainer, reusing the layer cache unless --no-cache is passed")
+@click.command(help="rebuild the devcontainer. reuses the layer cache unless --no-cache is passed")
 @click.argument("workspace", required=False)
 @click.option("--no-cache", "no_cache", is_flag=True, help="bypass BuildKit layer cache (full reinstall of all features)")
 @click.option("--lockfile", "lockfile", is_flag=True, help="allow devcontainer-lock.json creation/update")
@@ -535,6 +536,7 @@ def prune_cmd(target: str, yes: bool) -> None:
 
 @click.group(name="template", help="apply blessed devcontainer templates")
 def template_cmd() -> None:
+	# you have to do e.g. `dcman template apply <something>`, not just `dcman template`
 	pass
 
 
@@ -625,7 +627,7 @@ def auth(provider: str, clear_token: bool) -> None:
 		try:
 			removed = clear_provider_token(provider)
 		except SecretToolUnavailable as exc:
-			raise click.ClickException(str(exc))
+			raise click.ClickException(str(exc)) from exc
 		if removed:
 			click.echo(f"Cleared {provider} token from secret store.")
 		else:
@@ -635,7 +637,7 @@ def auth(provider: str, clear_token: bool) -> None:
 	try:
 		existing = get_provider_token(provider)
 	except SecretToolUnavailable as exc:
-		raise click.ClickException(str(exc))
+		raise click.ClickException(str(exc)) from exc
 
 	if existing and not click.confirm(f"A {provider} token is already stored. Replace it?", default=True):
 		click.echo("Nothing changed.")
@@ -700,11 +702,13 @@ def main() -> None:
 		# without exception chaining or a Python traceback.
 		msg = str(exc)
 		if "No devcontainer config found in" in msg:
-			click.echo(msg)
+			click.echo(msg, err=True)
 			# Exit with non-zero status to indicate failure.
 			sys.exit(1)
 		# Convert other internal errors into Click-style CLI errors (clean message + exit code).
-		raise click.ClickException(msg) from None
+		error = click.ClickException(msg)
+		error.show()
+		sys.exit(error.exit_code)
 
 
 if __name__ == "__main__":
