@@ -1,5 +1,6 @@
 __pycache__
 .venv
+.pytest-tmp/
 repomix-output.xml
 repomix*.xml
 README-other.md
