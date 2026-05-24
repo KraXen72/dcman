@@ -23,8 +23,14 @@ def _stub_container_up(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, ob
 	monkeypatch.setattr(cli, "devcontainer_up", fake_devcontainer_up)
 
 
-def _stub_container_up_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: set())
+def _stub_container_up_dependencies(
+	monkeypatch: pytest.MonkeyPatch,
+	*,
+	initialized_container_ids: set[str] | None = None,
+) -> None:
+	if initialized_container_ids is None:
+		initialized_container_ids = {"existing-container"}
+	monkeypatch.setattr(cli, "_initialized_container_ids", lambda ws: initialized_container_ids)
 	monkeypatch.setattr(cli, "wait_for_container", lambda ws: "container123")
 	monkeypatch.setattr(cli, "_devcontainer_env", lambda ws: {"DCMAN_SSH_PORT": "2222"})
 	monkeypatch.setattr(cli, "_sync_agent_instructions_if_configured", lambda *args, **kwargs: None)
@@ -99,6 +105,69 @@ def test_container_up_prompt_abort(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 	assert "Rebuild before starting? [Y/n/a]" in result.output
 	assert isinstance(result.exception, SystemExit)
 	assert calls == []
+
+
+@pytest.mark.cli
+def test_container_up_initial_build_without_container_skips_prompt(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	workspace = make_workspace(tmp_path / "ws", {".devcontainer.json": json.dumps({"name": "root"}) + "\n"})
+	calls: list[dict[str, object]] = []
+
+	_stub_container_up(monkeypatch, calls)
+	_stub_container_up_dependencies(monkeypatch, initialized_container_ids=set())
+
+	result, state_data = _invoke_container_up(workspace, input_text="")
+	assert result.exit_code == 0
+	assert "Rebuild before starting? [Y/n/a]" not in result.output
+	assert state_data["should_clear_known_host"] is True
+	assert calls[0]["rebuild"] is True
+
+	snapshot = container.stored_devcontainer_config_snapshot(workspace)
+	assert snapshot is not None
+	assert snapshot[".devcontainer.json"].strip() == '{"name": "root"}'
+	assert state.load_state(workspace).get("devcontainer_hash") == container.devcontainer_hash(workspace)
+
+
+@pytest.mark.cli
+def test_container_up_deleted_container_unchanged_config_rebuilds_without_prompt(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	workspace = make_workspace(tmp_path / "ws", {".devcontainer.json": json.dumps({"name": "root"}) + "\n"})
+	container.save_devcontainer_hash(workspace)
+	calls: list[dict[str, object]] = []
+
+	_stub_container_up(monkeypatch, calls)
+	_stub_container_up_dependencies(monkeypatch, initialized_container_ids=set())
+
+	result, state_data = _invoke_container_up(workspace, input_text="")
+	assert result.exit_code == 0
+	assert "Rebuild before starting? [Y/n/a]" not in result.output
+	assert state_data["should_clear_known_host"] is True
+	assert calls[0]["rebuild"] is True
+
+
+@pytest.mark.cli
+def test_container_up_deleted_container_changed_config_still_prompts(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	workspace = make_workspace(tmp_path / "ws", {".devcontainer.json": json.dumps({"name": "before"}) + "\n"})
+	container.save_devcontainer_hash(workspace)
+	write_text(workspace / ".devcontainer.json", json.dumps({"name": "after"}) + "\n")
+	calls: list[dict[str, object]] = []
+
+	_stub_container_up(monkeypatch, calls)
+	_stub_container_up_dependencies(monkeypatch, initialized_container_ids=set())
+
+	result, state_data = _invoke_container_up(workspace, input_text="y\n")
+	assert result.exit_code == 0
+	assert "Rebuild before starting? [Y/n/a]" in result.output
+	assert state_data["should_clear_known_host"] is True
+	assert calls[0]["rebuild"] is True
+
+	snapshot = container.stored_devcontainer_config_snapshot(workspace)
+	assert snapshot is not None
+	assert snapshot[".devcontainer.json"].strip() == '{"name": "after"}'
 
 
 @pytest.mark.cli

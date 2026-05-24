@@ -233,11 +233,21 @@ def _container_up(
 
 	current_hash = devcontainer_hash(ws)
 	stored_hash = load_state(ws).get("devcontainer_hash")
+	previous_container_ids = _initialized_container_ids(ws)
+	has_initialized_container = bool(previous_container_ids)
+	has_snapshot = stored_devcontainer_config_snapshot(ws) is not None
+	has_accepted_baseline = stored_hash is not None or has_snapshot
 	# Hash comparison is our lightweight "did devcontainer config change?" signal.
 	config_changed = current_hash is not None and current_hash != stored_hash
+	can_build_without_review = (
+		current_hash is not None
+		and not has_initialized_container
+		and (not has_accepted_baseline or current_hash == stored_hash)
+	)
+	needs_config_review = config_changed and not can_build_without_review
 
 	do_rebuild = False
-	if config_changed:
+	if needs_config_review:
 		if no_rebuild:
 			click.echo("Devcontainer config changed; starting without rebuilding.")
 		else:
@@ -250,6 +260,15 @@ def _container_up(
 				save_devcontainer_hash(ws)
 			if not do_rebuild:
 				click.echo("Starting without rebuilding; devcontainer config changes remain unapplied.")
+	elif can_build_without_review:
+		if no_rebuild:
+			if config_changed:
+				click.echo("Devcontainer config changed; starting without rebuilding.")
+			else:
+				click.echo("No initialized devcontainer found; starting without rebuilding.")
+		else:
+			do_rebuild = True
+			save_devcontainer_hash(ws)
 	elif current_hash is not None and stored_devcontainer_config_snapshot(ws) is None:
 		# Migrate users from the older hash-only state without forcing a rebuild.
 		save_devcontainer_hash(ws)
@@ -259,7 +278,6 @@ def _container_up(
 		feature_report = format_feature_versions(resolve_feature_versions(ws))
 		if feature_report:
 			click.echo(feature_report)
-	previous_container_ids = _initialized_container_ids(ws)
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
