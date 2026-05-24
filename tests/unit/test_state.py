@@ -53,14 +53,41 @@ def test_prune_removes_legacy_marker_for_unrelated_process(tmp_path: Path, monke
 def test_schedule_idle_stop_writes_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	workspace = tmp_path / "ws"
 	workspace.mkdir()
+	popen_calls: list[dict[str, object]] = []
 
 	class DummyProc:
 		pid = 4242
 
 	monkeypatch.setattr(state, "secrets", type("Secrets", (), {"token_hex": staticmethod(lambda n: "deadbeef")}))
-	monkeypatch.setattr(state.subprocess, "Popen", lambda *args, **kwargs: DummyProc())
+
+	def fake_popen(cmd: list[str], **kwargs: object) -> DummyProc:
+		popen_calls.append({"cmd": cmd, **kwargs})
+		return DummyProc()
+
+	monkeypatch.setattr(state.subprocess, "Popen", fake_popen)
 
 	state.schedule_idle_stop(workspace, delay=120)
+
+	assert len(popen_calls) == 1
+	call = popen_calls[0]
+	assert call["cmd"] == [
+		state.sys.executable,
+		"-m",
+		"dcman",
+		"_idle-stop",
+		"--workspace",
+		str(workspace),
+		"--delay",
+		"120",
+		"--token",
+		"deadbeef",
+	]
+	assert call["stdin"] is state.subprocess.DEVNULL
+	assert call["stdout"] is state.subprocess.DEVNULL
+	assert call["stderr"] is state.subprocess.DEVNULL
+	assert call["start_new_session"] is True
+	assert "PYTHONPATH" in call["env"]
+
 	payload = state.load_state(workspace)
 	assert payload["timer_token"] == "deadbeef"
 	assert payload["timer_pid"] == 4242

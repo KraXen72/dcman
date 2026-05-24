@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from dcman import cli
+from dcman import state
 from tests.helpers import invoke_in_click_context, make_workspace
 
 
@@ -67,3 +68,42 @@ def test_run_managed_shell_skips_schedule_when_other_sessions_active(tmp_path: P
 
 	result = invoke_in_click_context(run)
 	assert result.exit_code == 0
+
+
+@pytest.mark.cli
+def test_idle_stop_fires_and_clears_current_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	workspace = make_workspace(tmp_path / "ws", {})
+	state.save_state(workspace, {"workspace": str(workspace), "timer_token": "token-1", "timer_pid": 4242, "timer_started_at": 100})
+	stopped: list[str] = []
+
+	monkeypatch.setattr(cli.time, "sleep", lambda delay: None)
+	monkeypatch.setattr(cli, "prune_stale_sessions", lambda ws: 0)
+	monkeypatch.setattr(cli, "active_session_count", lambda ws: 0)
+	monkeypatch.setattr(cli, "find_container", lambda ws: "container123")
+	monkeypatch.setattr(cli, "stop_container", lambda container_id: stopped.append(container_id) or 0)
+
+	result = invoke_in_click_context(lambda: cli.idle_stop.callback(workspace, 5, "token-1"))
+
+	assert result.exit_code == 0
+	assert stopped == ["container123"]
+	payload = state.load_state(workspace)
+	assert payload["timer_token"] is None
+	assert payload["timer_pid"] is None
+	assert payload["timer_started_at"] is None
+
+
+@pytest.mark.cli
+def test_idle_stop_ignores_stale_timer_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	workspace = make_workspace(tmp_path / "ws", {})
+	state.save_state(workspace, {"workspace": str(workspace), "timer_token": "newer-token", "timer_pid": 4242})
+
+	monkeypatch.setattr(cli.time, "sleep", lambda delay: None)
+	monkeypatch.setattr(cli, "prune_stale_sessions", lambda ws: 0)
+	monkeypatch.setattr(cli, "active_session_count", lambda ws: 0)
+	monkeypatch.setattr(cli, "find_container", lambda ws: (_ for _ in ()).throw(AssertionError("stale timer should not inspect container")))
+	monkeypatch.setattr(cli, "stop_container", lambda container_id: (_ for _ in ()).throw(AssertionError("stale timer should not stop container")))
+
+	result = invoke_in_click_context(lambda: cli.idle_stop.callback(workspace, 5, "old-token"))
+
+	assert result.exit_code == 0
+	assert state.load_state(workspace)["timer_token"] == "newer-token"
