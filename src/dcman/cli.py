@@ -30,12 +30,14 @@ from .config import (
 from .container import (
 	container_engine,
 	container_exec_interactive,
+	container_writable_size,
 	devcontainer_hash,
 	devcontainer_template_apply,
 	devcontainer_up,
 	ensure_devcontainer_config,
 	find_container,
 	find_initialized_devcontainers,
+	format_container_size,
 	format_devcontainer_config_diff,
 	list_initialized_devcontainers,
 	remote_workspace_folder,
@@ -496,6 +498,34 @@ def list_cmd() -> None:
 	click.echo(render_devcontainer_table(entries))
 
 
+def _with_writable_sizes(entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+	sized_entries: list[dict[str, Any]] = []
+	for entry in entries:
+		sized_entry = dict(entry)
+		sized_entry["writable_size"] = container_writable_size(entry["id"])
+		sized_entries.append(sized_entry)
+	return sized_entries
+
+
+def _prune_space_summary(entries: list[dict[str, Any]]) -> str:
+	total = 0
+	known = 0
+	for entry in entries:
+		size = entry.get("writable_size")
+		if isinstance(size, int):
+			total += size
+			known += 1
+
+	if known == 0:
+		return "unknown"
+
+	summary = format_container_size(total)
+	unknown = len(entries) - known
+	if unknown:
+		summary = f"{summary} (+ {unknown} unknown)"
+	return summary
+
+
 @click.command(name="prune")
 @click.argument("target", default=".")
 @click.option("-y", "--yes", is_flag=True, help="skip confirmation prompt")
@@ -507,33 +537,42 @@ def prune_cmd(target: str, yes: bool) -> None:
 	"""
 	if target == "all":
 		click.echo("current containers: ")
-		containers = list_initialized_devcontainers()
+		containers = _with_writable_sizes(list_initialized_devcontainers())
 		click.echo(render_devcontainer_table(containers))
 
-		if not yes and not click.confirm(f"Delete {len(containers)} container(s)?", default=True):
+		if not yes and not click.confirm(
+			f"Delete {len(containers)} container(s), freeing about {_prune_space_summary(containers)}?",
+			default=True,
+		):
 			click.echo("Nothing changed.")
 			return
 
-		for path in [Path(cont["workspace"]) for cont in containers]:
-			for cont in find_initialized_devcontainers(path):
-				remove_container(cont["id"])
+		cleared_workspaces: set[Path] = set()
+		for cont in containers:
+			remove_container(str(cont["id"]))
+			workspace = Path(str(cont["workspace"]))
+			if workspace not in cleared_workspaces:
+				_clear_known_host_for_workspace(workspace)
+				clear_workspace_tracking(workspace)
+				cleared_workspaces.add(workspace)
+		click.echo(f"Removed {len(containers)} container(s), freed about {_prune_space_summary(containers)}.")
 		return
 
 	target_ws: Path
 	if target == "select":
 		# Interactive mode helps when many workspaces are present.
-		entries = list_initialized_devcontainers()
+		entries = _with_writable_sizes(list_initialized_devcontainers())
 		if not entries:
 			click.echo("No initialized devcontainers found.")
 			return
 		click.echo(render_devcontainer_table(entries))
 		choice = click.prompt("Select container number", type=click.IntRange(1, len(entries)))
-		target_ws = Path(entries[choice - 1]["workspace"])
+		target_ws = Path(str(entries[choice - 1]["workspace"]))
 	else:
 		target_path = str(Path.cwd() if target == "." else target)
 		target_ws = workspace_path(target_path)
 
-	matches = find_initialized_devcontainers(target_ws)
+	matches = _with_writable_sizes(find_initialized_devcontainers(target_ws))
 	if not matches:
 		# Even with no containers left, clearing tracking avoids stale local state.
 		_clear_known_host_for_workspace(target_ws)
@@ -541,15 +580,22 @@ def prune_cmd(target: str, yes: bool) -> None:
 		click.echo(f"No initialized devcontainers found for {target_ws}. Cleared dcman tracking state.")
 		return
 
-	if not yes and not click.confirm(f"Delete {len(matches)} container(s) for {target_ws}?", default=True):
+	if not yes and not click.confirm(
+		f"Delete {len(matches)} container(s) for {target_ws}, freeing about {_prune_space_summary(matches)}?",
+		default=True,
+	):
 		click.echo("Nothing changed.")
 		return
 
 	for entry in matches:
-		remove_container(entry["id"])
+		remove_container(str(entry["id"]))
 	_clear_known_host_for_workspace(target_ws)
 	clear_workspace_tracking(target_ws)
-	click.echo(f"Removed {len(matches)} container(s) for {target_ws}.")
+	space_summary = _prune_space_summary(matches)
+	if space_summary == "unknown":
+		click.echo(f"Removed {len(matches)} container(s) for {target_ws}. Estimated freed space: unknown.")
+	else:
+		click.echo(f"Removed {len(matches)} container(s) for {target_ws}, freed about {space_summary}.")
 
 
 @click.group(name="template", help="apply blessed devcontainer templates")

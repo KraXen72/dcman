@@ -17,6 +17,7 @@ from typing import Any, cast
 from python_on_whales import DockerClient
 from python_on_whales.components.container.cli_wrapper import Container
 from python_on_whales.exceptions import DockerException
+from rich.filesize import decimal
 
 from . import devcontainer_cli
 from .config import DEFAULT_DEVCONTAINER_TEMPLATE, DEFAULT_WORKSPACE_FOLDER, DEVCONTAINER_TEMPLATES, UidFastPath
@@ -174,15 +175,52 @@ def find_initialized_devcontainers(workspace: Path) -> list[dict[str, str]]:
 	return [row for row in list_initialized_devcontainers() if row["workspace"] == target]
 
 
-def render_devcontainer_table(entries: list[dict[str, str]]) -> str:
+def format_container_size(size: int | None) -> str:
+	return "unknown" if size is None else decimal(size, precision=1)
+
+
+def render_devcontainer_table(entries: list[dict[str, Any]]) -> str:
+	show_size = any("writable_size" in entry for entry in entries)
 	headers = ("#", "container (name/id)", "state", "workspace")
-	rows: list[tuple[str, str, str, str]] = []
+	if show_size:
+		headers = ("#", "container (name/id)", "state", "writable size", "workspace")
+
+	rows: list[tuple[str, ...]] = []
 	for idx, entry in enumerate(entries, start=1):
-		name_and_id = entry["short_id"]
+		short_id = str(entry["short_id"])
+		name_and_id = short_id
 		if entry["name"]:
-			name_and_id = f"{entry['name']} ({entry['short_id']})"
-		rows.append((str(idx), name_and_id, entry["status"], entry["workspace"]))
+			name_and_id = f"{entry['name']} ({short_id})"
+		row = (str(idx), name_and_id, str(entry["status"]), str(entry["workspace"]))
+		if show_size:
+			row = (
+				str(idx),
+				name_and_id,
+				str(entry["status"]),
+				format_container_size(cast(int | None, entry.get("writable_size"))),
+				str(entry["workspace"]),
+			)
+		rows.append(row)
 	return render_table(headers, rows)
+
+
+def container_writable_size(container_id: str) -> int | None:
+	try:
+		result = run([container_engine(), "container", "inspect", "--size", container_id], capture=True, check=False)
+	except CmdError:
+		return None
+	if result.returncode != 0:
+		return None
+
+	try:
+		payload = json.loads(result.stdout)
+	except ValueError:
+		return None
+	if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+		return None
+
+	size = payload[0].get("SizeRw")
+	return size if isinstance(size, int) and size >= 0 else None
 
 
 def find_container(workspace: Path) -> str | None:
