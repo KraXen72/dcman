@@ -16,6 +16,10 @@ from .config import STATE_ROOT
 # used for per-workspace coordination (SSH port reuse, active shells, idle timer).
 
 
+def content_hash(content: bytes) -> str:
+	return sha256(content).hexdigest()
+
+
 def workspace_path(raw: str | None) -> Path:
 	# Normalize once (expand ~ + absolute path) so lookups are stable everywhere.
 	return Path(raw or os.getcwd()).expanduser().resolve()
@@ -24,7 +28,7 @@ def workspace_path(raw: str | None) -> Path:
 def workspace_key(workspace: Path) -> str:
 	# Stable short hash keeps cache paths deterministic without leaking full paths
 	# into directory names (which can be long/awkward).
-	return sha256(str(workspace).encode("utf-8")).hexdigest()[:16]
+	return content_hash(str(workspace).encode("utf-8"))[:16]
 
 
 def workspace_state_dir(workspace: Path) -> Path:
@@ -69,6 +73,52 @@ def save_state(workspace: Path, data: dict[str, Any]) -> None:
 	tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 	# Atomic rename avoids partially-written JSON if the process is interrupted.
 	tmp.replace(path)
+
+
+def seeded_file_is_current(
+	workspace: Path,
+	key: str,
+	*,
+	version: int,
+	container_id: str,
+	source_path: Path,
+	source_hash: str,
+) -> bool:
+	cache = load_state(workspace).get("container_seed_cache")
+	if not isinstance(cache, dict):
+		return False
+	entry = cache.get(key)
+	if not isinstance(entry, dict):
+		return False
+	return (
+		entry.get("version") == version
+		and entry.get("container_id") == container_id
+		and entry.get("source_path") == str(source_path.resolve(strict=False))
+		and entry.get("source_hash") == source_hash
+	)
+
+
+def mark_seeded_file_current(
+	workspace: Path,
+	key: str,
+	*,
+	version: int,
+	container_id: str,
+	source_path: Path,
+	source_hash: str,
+) -> None:
+	state = load_state(workspace)
+	cache = state.get("container_seed_cache")
+	if not isinstance(cache, dict):
+		cache = {}
+		state["container_seed_cache"] = cache
+	cache[key] = {
+		"version": version,
+		"container_id": container_id,
+		"source_path": str(source_path.resolve(strict=False)),
+		"source_hash": source_hash,
+	}
+	save_state(workspace, state)
 
 
 def pid_alive(pid: int | None) -> bool:

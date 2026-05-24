@@ -155,9 +155,9 @@ def _copy_codex_cli_auth_if_needed(workspace: Path, container_id: str) -> None:
 		click.echo(message, err=message.startswith("Warning:"))
 
 
-def _sync_agent_instructions_if_configured(container_id: str) -> None:
+def _sync_agent_instructions_if_configured(workspace: Path, container_id: str) -> None:
 	try:
-		message = agent_instructions.sync_to_container(container_id, user=REMOTE_USER)
+		message = agent_instructions.sync_to_container(workspace, container_id, user=REMOTE_USER)
 	except CmdError as exc:
 		# Do not block shell access on optional instruction sync.
 		click.echo(f"Warning: {exc}", err=True)
@@ -227,7 +227,7 @@ def _container_up(
 		devcontainer_up(ws, rebuild=True, no_cache=no_cache, lockfile=lockfile, env=env)
 		container_id = wait_for_container(ws)
 		if container_id:
-			_sync_agent_instructions_if_configured(container_id)
+			_sync_agent_instructions_if_configured(ws, container_id)
 			_copy_codex_cli_auth_if_needed(ws, container_id)
 		return env, True
 
@@ -281,7 +281,7 @@ def _container_up(
 	devcontainer_up(ws, rebuild=do_rebuild, lockfile=lockfile, env=env)
 	container_id = wait_for_container(ws)
 	if container_id:
-		_sync_agent_instructions_if_configured(container_id)
+		_sync_agent_instructions_if_configured(ws, container_id)
 		_copy_codex_cli_auth_if_needed(ws, container_id)
 	if not config_changed:
 		save_devcontainer_hash(ws)

@@ -6,8 +6,11 @@ from pathlib import Path
 from .config import REMOTE_USER
 from .container import container_user_home, write_container_file
 from .errors import CmdError
+from .state import content_hash, mark_seeded_file_current, seeded_file_is_current
 
 SOURCE_PATH_ENV = "DCMAN_AGENTS_MD"
+SEED_CACHE_KEY = "agent_instructions"
+SEED_CACHE_VERSION = 1
 
 HOME_RELATIVE_TOOL_PATHS = (
 	Path(".codex/AGENTS.md"),
@@ -94,7 +97,7 @@ def unlink_host_links() -> list[str]:
 	return [str(link) for link in links]
 
 
-def sync_to_container(container_id: str, *, user: str = REMOTE_USER) -> str | None:
+def sync_to_container(workspace: Path, container_id: str, *, user: str = REMOTE_USER) -> str | None:
 	source = source_path()
 	if not source.is_file():
 		# Optional by design; avoid noisy starts for users without this file.
@@ -105,6 +108,17 @@ def sync_to_container(container_id: str, *, user: str = REMOTE_USER) -> str | No
 	except OSError as exc:
 		raise CmdError(f"failed to read global agent instructions file {source}: {exc}") from exc
 
+	source_hash = content_hash(content)
+	if seeded_file_is_current(
+		workspace,
+		SEED_CACHE_KEY,
+		version=SEED_CACHE_VERSION,
+		container_id=container_id,
+		source_path=source,
+		source_hash=source_hash,
+	):
+		return None
+
 	paths = _container_tool_paths(container_user_home(container_id, user))
 	try:
 		for path in paths:
@@ -112,4 +126,12 @@ def sync_to_container(container_id: str, *, user: str = REMOTE_USER) -> str | No
 	except CmdError as exc:
 		raise CmdError(f"failed to sync global agent instructions into the container: {exc}") from exc
 
+	mark_seeded_file_current(
+		workspace,
+		SEED_CACHE_KEY,
+		version=SEED_CACHE_VERSION,
+		container_id=container_id,
+		source_path=source,
+		source_hash=source_hash,
+	)
 	return f"Synced global agent instructions from {source}."
