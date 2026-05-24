@@ -84,6 +84,39 @@ def pid_alive(pid: int | None) -> bool:
 	return True
 
 
+def pid_started_at(pid: int | None) -> int | None:
+	if not pid or pid <= 0:
+		return None
+	try:
+		return int(Path(f"/proc/{pid}").stat().st_ctime)
+	except OSError:
+		return None
+
+
+def pid_cmdline(pid: int | None) -> str | None:
+	if not pid or pid <= 0:
+		return None
+	try:
+		return Path(f"/proc/{pid}/cmdline").read_text(errors="replace").replace("\0", " ").strip()
+	except OSError:
+		return None
+
+
+def marker_matches_live_manager(payload: dict[str, Any]) -> bool:
+	pid = payload.get("manager_pid")
+	if not isinstance(pid, int) or not pid_alive(pid):
+		return False
+
+	expected_started_at = payload.get("manager_started_at")
+	if isinstance(expected_started_at, int):
+		return pid_started_at(pid) == expected_started_at
+
+	# Legacy markers did not record process identity beyond PID. If that PID is
+	# now a clearly unrelated process, do not let it suppress idle shutdown forever.
+	cmdline = pid_cmdline(pid)
+	return cmdline is None or "dcman" in cmdline
+
+
 def prune_stale_sessions(workspace: Path) -> int:
 	ensure_state_dirs(workspace)
 	removed = 0
@@ -95,10 +128,9 @@ def prune_stale_sessions(workspace: Path) -> int:
 			entry.unlink(missing_ok=True)
 			removed += 1
 			continue
-		pid = payload.get("manager_pid")
-		# If pid is missing/invalid/dead, this session marker no longer represents
-		# an active shell and should not block idle shutdown.
-		if not isinstance(pid, int) or not pid_alive(pid):
+		# If the marker no longer represents the original dcman process, it should
+		# not block lifecycle operations or idle shutdown.
+		if not marker_matches_live_manager(payload):
 			entry.unlink(missing_ok=True)
 			removed += 1
 	return removed
@@ -122,6 +154,7 @@ def register_session(workspace: Path, session_id: str) -> Path:
 		# We track the manager PID so stale sessions from crashed terminals can
 		# be garbage-collected automatically.
 		"manager_pid": os.getpid(),
+		"manager_started_at": pid_started_at(os.getpid()),
 		"created_at": int(time.time()),
 	}
 	path = sessions_dir(workspace) / f"{session_id}.json"
