@@ -115,10 +115,11 @@ On `dcman start`, `dcman shell`, `dcman rebuild`, or `dcman zed`, dcman ensures 
 - `/home/vscode/.codex/AGENTS.md` for Codex CLI
 - `/home/vscode/.copilot/copilot-instructions.md` for GitHub Copilot CLI
 - `/home/vscode/.config/zed/AGENTS.md` for Zed's native agent
+- `/home/vscode/.config/opencode/AGENTS.md` for OpenCode CLI inside the container and Zed's OpenCode external agent in SSH/remote sessions
 
 If `XDG_CONFIG_HOME` is set, dcman uses `$XDG_CONFIG_HOME/dcman/AGENTS.md` instead. Set `DCMAN_AGENTS_MD=/path/to/AGENTS.md` to use a different host file. dcman copies the file instead of symlinking it, skips the copy when the same content was already seeded into the same container, and it does not write anything into project roots. Project-local files such as `AGENTS.md`, nested `AGENTS.md`, and `.github/copilot-instructions.md` are still loaded by the respective tools as project-specific guidance.
 
-For agent sessions started directly on the host, create symlinks into each tool's host config:
+For agent sessions started directly on the host, including host-side OpenCode CLI or local Zed OpenCode external-agent sessions, create symlinks into each tool's host config:
 
 ```bash
 dcman agents link-host

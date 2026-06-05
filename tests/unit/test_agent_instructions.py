@@ -26,14 +26,19 @@ def test_sync_to_container_skips_when_source_hash_and_container_match(
 	)
 
 	assert agent_instructions.sync_to_container(workspace, "container1") == f"Synced global agent instructions from {source}."
-	assert len(writes) == 3
+	assert [path for _, path, _ in writes] == [
+		"/home/vscode/.codex/AGENTS.md",
+		"/home/vscode/.copilot/copilot-instructions.md",
+		"/home/vscode/.config/zed/AGENTS.md",
+		"/home/vscode/.config/opencode/AGENTS.md",
+	]
 
 	assert agent_instructions.sync_to_container(workspace, "container1") is None
-	assert len(writes) == 3
+	assert len(writes) == 4
 
 	source.write_text("be concise\n")
 	assert agent_instructions.sync_to_container(workspace, "container1") == f"Synced global agent instructions from {source}."
-	assert len(writes) == 6
+	assert len(writes) == 8
 
 	assert agent_instructions.sync_to_container(workspace, "container2") == f"Synced global agent instructions from {source}."
-	assert len(writes) == 9
+	assert len(writes) == 12

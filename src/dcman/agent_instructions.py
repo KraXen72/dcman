@@ -18,6 +18,7 @@ HOME_RELATIVE_TOOL_PATHS = (
 )
 CONFIG_RELATIVE_TOOL_PATHS = (
 	Path("zed/AGENTS.md"),
+	Path("opencode/AGENTS.md"),
 )
 # home-relative as well
 DEFAULT_SOURCE_CONFIG_PATH = Path("dcman/AGENTS.md")
