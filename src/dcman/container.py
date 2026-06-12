@@ -56,6 +56,12 @@ def _docker_cmd_error(message: str, exc: DockerException) -> CmdError:
 
 def _is_missing_container_error(exc: DockerException) -> bool:
 	details = _format_docker_exception(exc).lower()
+	return _is_missing_container_message(details)
+
+
+def _is_missing_container_message(details: str) -> bool:
+	# Engines phrase this race differently; both mean a listed container can no
+	# longer be inspected.
 	return "container not known" in details or "no such container" in details
 
 
@@ -575,6 +581,44 @@ def _delete_created_lockfile(lockfile_path: Path | None, *, existed_before: bool
 		raise CmdError(f"devcontainer lockfile was created but could not be deleted: {lockfile_path}: {exc}") from exc
 
 
+def _cleanup_stale_podman_container(container_id: str, original_error: DockerException) -> None:
+	if container_engine() != "podman":
+		raise _docker_cmd_error(f"failed to remove stale container {container_id[:12]}", original_error)
+
+	# Podman can get stuck with an entry that normal rm cannot inspect/remove but
+	# `container cleanup --rm` can finish deleting.
+	result = run(["podman", "container", "cleanup", "--rm", container_id], capture=True, check=False)
+	if result.returncode != 0:
+		raise _docker_cmd_error(f"failed to remove stale container {container_id[:12]}", original_error)
+
+
+def _remove_stale_devcontainer(container: Container, exc: DockerException) -> None:
+	container_id = container.id
+	try:
+		_client().container.remove(container_id, force=True)
+	except DockerException:
+		_cleanup_stale_podman_container(container_id, exc)
+
+
+def _repair_stale_devcontainer_entries(workspace: Path) -> None:
+	label = f"devcontainer.local_folder={workspace}"
+	try:
+		containers = _client().container.list(all=True, filters=[("label", label)])
+	except DockerException as exc:
+		raise _docker_cmd_error(f"failed to list containers for workspace {workspace}", exc) from exc
+
+	for container in containers:
+		try:
+			# python-on-whales returns immutable IDs from list(); reload forces the
+			# inspect that the Dev Container CLI will do later.
+			container.reload()
+		except DockerException as exc:
+			if _is_missing_container_error(exc):
+				_remove_stale_devcontainer(container, exc)
+				continue
+			raise _docker_cmd_error(f"failed to inspect container {container.id[:12]}", exc) from exc
+
+
 def devcontainer_up(
 	workspace: Path,
 	*,
@@ -594,6 +638,10 @@ def devcontainer_up(
 		# Dev Container CLI now generates feature lockfiles by default. dcman
 		# keeps that opt-in where the installed CLI supports suppression.
 		flags.append("--no-lockfile")
+
+	# Remove stale list entries before Dev Container CLI tries to inspect them
+	# while deciding whether an existing workspace container must be recreated.
+	_repair_stale_devcontainer_entries(workspace)
 
 	lockfile_path = _devcontainer_lockfile_path(workspace)
 	lockfile_existed_before = lockfile_path.is_file() if lockfile_path else False
