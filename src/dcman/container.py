@@ -54,6 +54,11 @@ def _docker_cmd_error(message: str, exc: DockerException) -> CmdError:
 	return CmdError(message)
 
 
+def _is_missing_container_error(exc: DockerException) -> bool:
+	details = _format_docker_exception(exc).lower()
+	return "container not known" in details or "no such container" in details
+
+
 def _validate_engine_binary(name: str) -> str:
 	# Only called when the user has explicitly set DCMAN_CONTAINER_ENGINE,
 	# so an empty or missing binary is unambiguously a misconfiguration.
@@ -148,14 +153,21 @@ def _list_containers(*, all_containers: bool) -> list[Container]:
 def list_initialized_devcontainers() -> list[dict[str, str]]:
 	entries: list[dict[str, str]] = []
 	for container in _list_containers(all_containers=True):
-		if not _is_devcontainer(container):
-			continue
-		workspace = _workspace_from_container(container)
-		if workspace is None:
-			continue
+		try:
+			if not _is_devcontainer(container):
+				continue
+			workspace = _workspace_from_container(container)
+			if workspace is None:
+				continue
 
-		container_id = container.id
-		status = container.state.status or "unknown"
+			container_id = container.id
+			status = container.state.status or "unknown"
+		except DockerException as exc:
+			# Podman can leave a container in `ps -a` as "Removing" even though
+			# a follow-up inspect already reports it as gone.
+			if _is_missing_container_error(exc):
+				continue
+			raise
 
 		entries.append(
 			{
