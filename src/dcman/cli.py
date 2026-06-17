@@ -52,6 +52,7 @@ from .container import (
 from .errors import CmdError, SecretToolUnavailable
 from .features import format_feature_versions, resolve_feature_versions
 from .integrations import codex, zed
+from .rendering import fmt_err
 from .ssh import alloc_ssh_port, detect_shell
 from .state import (
 	active_session_count,
@@ -94,7 +95,8 @@ def require_binaries() -> None:
 		require_devcontainer_cli()
 		container_engine()
 	except CmdError as exc:
-		raise click.ClickException(str(exc)) from exc
+		click.echo(fmt_err(str(exc)), err=True)
+		sys.exit(1)
 
 
 def _format_aliases(aliases: Mapping[str, object]) -> str:
@@ -501,7 +503,7 @@ def list_cmd() -> None:
 def _with_writable_sizes(entries: list[dict[str, str]]) -> list[dict[str, Any]]:
 	sized_entries: list[dict[str, Any]] = []
 	for entry in entries:
-		sized_entry = dict(entry)
+		sized_entry: dict[str, Any] = dict(entry)
 		sized_entry["writable_size"] = container_writable_size(entry["id"])
 		sized_entries.append(sized_entry)
 	return sized_entries
@@ -639,7 +641,8 @@ def agents_link_host_cmd() -> None:
 	try:
 		messages = agent_instructions.configure_host_links()
 	except CmdError as exc:
-		raise click.ClickException(str(exc)) from None
+		click.echo(fmt_err(str(exc)), err=True)
+		sys.exit(1)
 	for message in messages:
 		click.echo(message)
 
@@ -654,7 +657,8 @@ def agents_unlink_host_cmd(yes: bool) -> None:
 	try:
 		messages = agent_instructions.unlink_host_links()
 	except CmdError as exc:
-		raise click.ClickException(str(exc)) from None
+		click.echo(fmt_err(str(exc)), err=True)
+		sys.exit(1)
 	for message in messages:
 		click.echo(message)
 
@@ -766,13 +770,10 @@ def main() -> None:
 		# without exception chaining or a Python traceback.
 		msg = str(exc)
 		if "No devcontainer config found in" in msg:
-			click.echo(msg, err=True)
-			# Exit with non-zero status to indicate failure.
+			click.echo(fmt_err(msg), err=True)
 			sys.exit(1)
-		# Convert other internal errors into Click-style CLI errors (clean message + exit code).
-		error = click.ClickException(msg)
-		error.show()
-		sys.exit(error.exit_code)
+		click.echo(fmt_err(msg), err=True)
+		sys.exit(1)
 
 
 if __name__ == "__main__":

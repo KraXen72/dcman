@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from io import StringIO
 from typing import Literal
 
+import click
 from rich import box
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -64,3 +66,22 @@ def render_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 def render_diff(diff: str) -> str:
 	return render_to_string(Syntax(diff, "diff", word_wrap=False, background_color="default"))
+
+
+def fmt_err(msg: str) -> str:
+	msg = re.sub(
+		r"'[^']*'",
+		lambda m: click.style(m.group(0), fg="bright_yellow"),
+		msg,
+	)
+	msg = re.sub(
+		r"\$\{[^}]+\}",
+		lambda m: click.style(m.group(0), fg="bright_yellow"),
+		msg,
+	)
+	msg = re.sub(
+		r"--[a-zA-Z0-9_.-]+(?:=[^\s'\"$]*)?",
+		lambda m: click.style(m.group(0), fg="bright_yellow"),
+		msg,
+	)
+	return click.style("Error: ", bold=True, fg="red") + msg
