@@ -5,15 +5,14 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import pexpect
 import pytest
 
 from tests.helpers import make_workspace
-
 
 _PHASE_STARTED_AT: float | None = None
 _HOST_HOME = Path(os.environ.get("HOME", str(Path.home()))).expanduser()

@@ -22,6 +22,7 @@ from rich.filesize import decimal
 from . import devcontainer_cli
 from .config import DEFAULT_DEVCONTAINER_TEMPLATE, DEFAULT_WORKSPACE_FOLDER, DEVCONTAINER_TEMPLATES, UidFastPath
 from .errors import CmdError
+from .lint import check_container_name_conflict, validate_runargs_container_name
 from .process import run
 from .rendering import render_diff, render_table
 from .state import load_state, save_state
@@ -638,6 +639,12 @@ def devcontainer_up(
 		# Dev Container CLI now generates feature lockfiles by default. dcman
 		# keeps that opt-in where the installed CLI supports suppression.
 		flags.append("--no-lockfile")
+
+	# Validate container name before invoking the CLI; the Dev Container CLI
+	# substitutes ${localWorkspaceFolderBasename} and other variables into
+	# runArgs at runtime, and podman/docker reject invalid container names.
+	validate_runargs_container_name(workspace)
+	check_container_name_conflict(workspace, engine=container_engine())
 
 	# Remove stale list entries before Dev Container CLI tries to inspect them
 	# while deciding whether an existing workspace container must be recreated.
