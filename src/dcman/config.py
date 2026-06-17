@@ -62,4 +62,5 @@ AUTH_PROVIDERS: dict[str, str] = {
 PRESETS: dict[str, str] = {
 	"copilot": "copilot --yolo",
 	"codex": "codex --yolo",
+	"opencode": "OPENCODE_CONFIG=~/.config/opencode/opencode-yolo.json opencode",
 }
